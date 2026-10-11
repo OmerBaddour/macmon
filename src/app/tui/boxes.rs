@@ -1,10 +1,13 @@
-//! Metrics box (the metric boxes of the original macmon: CPU clusters, GPU, RAM, CPU / GPU power,
-//! with a network box in place of ANE power) and the box frame it shares with the process list:
-//! rounded borders, titles fitted on the top border, a text and the key hints on the bottom border.
+//! Metrics box (the metric boxes of the original macmon: CPU, GPU, RAM, CPU / GPU power, with one
+//! CPU box in place of one per cluster and a network box in place of ANE power) and the box frame
+//! it shares with the process list: rounded borders, titles fitted on the top border, a text and
+//! the key hints on the bottom border.
 //!
 //! The RAM box goes further than the original: a bar of the kinds of RAM (wired / app /
 //! compressed / cached, as Activity Monitor splits it), the history colored by memory pressure,
 //! the pressure on the top border, and the legend and swap rates on its bottom border.
+//!
+//! The CPU box shows the whole CPU, the clusters on its bottom border.
 //!
 //! The network box shows download over upload, both graphs on one scale so they compare, with the
 //! current rates on the top border and the peaks on screen on the bottom border.
@@ -377,8 +380,8 @@ impl App {
     let Some(area) = plan.top else { return };
     draw_box(f, area, self.metrics_titles());
 
-    for &(metric, r) in &plan.boxes {
-      let metric = self.metric_box(metric);
+    for &(kind, r) in &plan.boxes {
+      let metric = self.metric_box(kind);
       let inner = draw_box(f, r, fit_titles(r.width, metric.titles));
       let graph = Graph::new(metric.data).three_levels(self.three_level_bars);
       match metric.scale {
@@ -405,6 +408,9 @@ impl App {
             render_bottom_border(f, r, vec![], |room| self.ram_legend(room));
           }
         }
+      }
+      if kind == Metric::Cpu && r.height >= 2 {
+        render_bottom_border(f, r, vec![], |room| self.cluster_summary(room));
       }
     }
 
@@ -466,13 +472,10 @@ impl App {
     join(parts)
   }
 
-  /// Titles and history of `metric`; its cluster comes from the same list the layout counts.
+  /// Titles and history of `metric`.
   fn metric_box(&self, metric: Metric) -> MetricBox<'_> {
     match metric {
-      Metric::Cluster(i) => {
-        let cluster = &self.clusters.items[i];
-        self.freq_box(format!("{}-CPU", cluster.label), &cluster.freq)
-      }
+      Metric::Cpu => self.cpu_box(),
       Metric::Gpu => self.freq_box("GPU".to_string(), &self.igpu_freq),
       Metric::Ram => self.ram_box(),
       Metric::CpuPower => self.power_box("CPU", &self.cpu_power, self.cpu_temp.last()),
@@ -481,7 +484,45 @@ impl App {
     }
   }
 
-  /// `E-CPU 42% @ 1800 MHz` (the percent colored by load), or `E-CPU 42%` when the frequency
+  /// `CPU 60%` (colored by load) over the usage history of the whole CPU scaled to 100 %, or a
+  /// gauge. The usage is the clusters' weighted by core count; they go on the bottom border (see
+  /// `cluster_summary`).
+  fn cpu_box(&self) -> MetricBox<'_> {
+    let series = self.cpu.ratio(self.cfg.ratio_mode);
+    let title = vec![heading("CPU"), text(" "), self.percent(series.ratio, 0)];
+    MetricBox {
+      titles: vec![Titles::new(title)],
+      data: &series.items,
+      scale: Scale::Load { max: 100, load: series.ratio },
+    }
+  }
+
+  /// The CPU clusters for the bottom border of the CPU box, highest tier first, each usage in its
+  /// load color: `S 30% 4.1 GHz · P 5% 2.5 GHz`, or `S 30% · P 5%` when that doesn't fit in
+  /// `room`; nothing when neither does. A single busy thread shows here, where the whole CPU
+  /// barely moves.
+  fn cluster_summary(&self, room: usize) -> Vec<Span<'static>> {
+    let (mut full, mut short) = (vec![], vec![]);
+    for (i, cluster) in self.clusters.items.iter().rev().enumerate() {
+      if i > 0 {
+        full.push(dim(" · "));
+        short.push(dim(" · "));
+      }
+      let usage = [
+        heading(cluster.label.clone()),
+        text(" "),
+        self.percent(cluster.freq.ratio(self.cfg.ratio_mode).ratio, 0),
+      ];
+      full.extend(usage.clone());
+      full.push(text(format!(" {:.1} GHz", cluster.freq.freq_mhz as f64 / 1000.0)));
+      short.extend(usage);
+    }
+
+    let fits = |spans: &Vec<Span>| spans.iter().map(Span::width).sum::<usize>() <= room;
+    [full, short].into_iter().find(fits).unwrap_or_default()
+  }
+
+  /// `GPU 23% @ 1400 MHz` (the percent colored by load), or `GPU 23%` when the frequency
   /// doesn't fit, over the usage history scaled to 100 %, or a gauge.
   fn freq_box<'a>(&self, label: String, freq: &'a FreqStore) -> MetricBox<'a> {
     let series = freq.ratio(self.cfg.ratio_mode);

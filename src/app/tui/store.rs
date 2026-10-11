@@ -43,19 +43,17 @@ impl RatioSeries {
   }
 }
 
-/// One frequency with parallel scaled and active ratio histories.
+/// Parallel scaled and active ratio histories of one load.
 #[derive(Debug, Default, Clone)]
-pub(super) struct FreqStore {
-  pub(super) freq_mhz: u64,
+pub(super) struct LoadStore {
   scaled: RatioSeries,
   active: RatioSeries,
 }
 
-impl FreqStore {
-  pub(super) fn push(&mut self, sample: FreqSample) {
-    self.freq_mhz = sample.freq_mhz;
-    self.scaled.push(sample.scaled_ratio);
-    self.active.push(sample.active_ratio);
+impl LoadStore {
+  pub(super) fn push(&mut self, scaled_ratio: f64, active_ratio: f64) {
+    self.scaled.push(scaled_ratio);
+    self.active.push(active_ratio);
   }
 
   pub(super) fn ratio(&self, mode: RatioMode) -> &RatioSeries {
@@ -63,6 +61,24 @@ impl FreqStore {
       RatioMode::Scaled => &self.scaled,
       RatioMode::Active => &self.active,
     }
+  }
+}
+
+/// One frequency with its load histories.
+#[derive(Debug, Default, Clone)]
+pub(super) struct FreqStore {
+  pub(super) freq_mhz: u64,
+  load: LoadStore,
+}
+
+impl FreqStore {
+  pub(super) fn push(&mut self, sample: FreqSample) {
+    self.freq_mhz = sample.freq_mhz;
+    self.load.push(sample.scaled_ratio, sample.active_ratio);
+  }
+
+  pub(super) fn ratio(&self, mode: RatioMode) -> &RatioSeries {
+    self.load.ratio(mode)
   }
 }
 

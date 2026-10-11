@@ -36,6 +36,7 @@ const HELP: &[Row] = &[
   Key("click", "a column header to sort, a row to select"),
   Section("Notes"),
   Key("CPU%", "100% is one fully busy core"),
+  Key("CPU box", "the whole CPU; its clusters below, fastest first"),
   Key("scaled", "usage weighted by frequency; active: share of time busy"),
   Key("POWER -", "not available for other users' processes"),
   Key("RAM bar", "wired / app / compressed / cached; free blank"),
