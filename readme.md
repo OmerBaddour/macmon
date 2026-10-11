@@ -20,7 +20,7 @@
 - 🚫 Runs without sudo
 - ⚡ Real-time CPU / GPU / ANE power usage
 - 📊 CPU frequency-scaled and active ratios per cluster
-- 💾 RAM / Swap usage
+- 💾 RAM / Swap usage, with wired / app / compressed / cached RAM, memory pressure and swap rates
 - 📈 Historical charts with average and max values
 - 🌡️ Average CPU / GPU temperature
 - 📋 Process list with per-process CPU, memory, power and GPU usage
@@ -218,6 +218,14 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
     "ram_usage": 20985479168, // Bytes
     "swap_total": 4294967296, // Bytes
     "swap_usage": 2602434560, // Bytes
+    "ram_wired": 4232577024, // Bytes, pinned: the kernel, GPU buffers
+    "ram_app": 13711769600, // Bytes, anonymous memory of processes
+    "ram_compressed": 2587754496, // Bytes of RAM the compressor occupies
+    "ram_compressed_data": 10136238080, // Bytes stored in the compressor, uncompressed
+    "ram_cached": 7301644288, // Bytes, cached files and purgeable memory
+    "pressure": "Normal", // "Normal" / "Warning" / "Critical", null when unavailable
+    "swap_in_rate": 0, // Bytes per second
+    "swap_out_rate": 0, // Bytes per second
   },
   "fans": [
     { "name": "fan0", "rpm": 999, "max_rpm": 4900 },

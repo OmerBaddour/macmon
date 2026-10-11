@@ -11,7 +11,7 @@ use crate::shared::{
 };
 use crate::sources::{
   IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, get_soc_info, libc_ram,
-  libc_swap,
+  libc_ram_breakdown, libc_swap, sysctl_mem_pressure,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -53,6 +53,12 @@ impl PowerSources {
   }
 }
 
+/// `bytes` over `elapsed` as bytes per second; 0 for no time.
+fn per_second(bytes: u64, elapsed: Duration) -> u64 {
+  let secs = elapsed.as_secs_f64();
+  if secs > 0.0 { (bytes as f64 / secs).round() as u64 } else { 0 }
+}
+
 // MARK: Structs
 
 /// Average hardware temperatures.
@@ -64,7 +70,34 @@ pub struct TempMetrics {
   pub gpu_temp_avg: Option<f32>,
 }
 
+/// Memory pressure as the kernel reports it, and Activity Monitor shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum MemPressure {
+  /// Memory is available without compressing or swapping much.
+  Normal,
+  /// The kernel compresses and swaps to keep up.
+  Warning,
+  /// Memory is short: apps slow down on swap, and the system may ask apps to quit.
+  Critical,
+}
+
+impl MemPressure {
+  /// Pressure for a `kern.memorystatus_vm_pressure_level` value: 1, 2 or 4.
+  fn from_level(level: u32) -> Option<Self> {
+    match level {
+      1 => Some(Self::Normal),
+      2 => Some(Self::Warning),
+      4 => Some(Self::Critical),
+      _ => None,
+    }
+  }
+}
+
 /// Memory and swap usage.
+///
+/// Used RAM splits into wired, app and compressed memory as in Activity Monitor; cached files on
+/// top of it are reclaimable, so a high `ram_usage` alone doesn't mean memory is short: `pressure`
+/// and the swap rates tell that.
 #[derive(Debug, Default, Serialize)]
 pub struct MemMetrics {
   /// Total physical memory in bytes.
@@ -75,6 +108,23 @@ pub struct MemMetrics {
   pub swap_total: u64,
   /// Used swap in bytes.
   pub swap_usage: u64,
+  /// Wired memory in bytes: pinned, never compressed or swapped (the kernel, GPU buffers).
+  pub ram_wired: u64,
+  /// App memory in bytes: anonymous memory of processes, without the purgeable part.
+  pub ram_app: u64,
+  /// RAM the compressor occupies, in bytes.
+  pub ram_compressed: u64,
+  /// Data held in the compressor before compression, in bytes; over `ram_compressed`, the
+  /// compression ratio.
+  pub ram_compressed_data: u64,
+  /// Cached files and purgeable memory in bytes, dropped whenever memory is needed.
+  pub ram_cached: u64,
+  /// Kernel memory pressure, or None when unavailable.
+  pub pressure: Option<MemPressure>,
+  /// Swap-ins over the sampling interval, in bytes per second.
+  pub swap_in_rate: u64,
+  /// Swap-outs over the sampling interval, in bytes per second.
+  pub swap_out_rate: u64,
 }
 
 /// Fan speed metrics.
@@ -406,6 +456,8 @@ pub struct Sampler {
   smc_cpu_keys: Vec<String>,
   smc_gpu_keys: Vec<String>,
   smc_fan_keys: Vec<String>,
+  /// Bytes swapped in and out since boot at the previous sample, for the swap rates.
+  prev_swapped: Option<(u64, u64)>,
 }
 
 impl Sampler {
@@ -425,6 +477,7 @@ impl Sampler {
       smc_cpu_keys: smc_sensors.cpu_keys,
       smc_gpu_keys: smc_sensors.gpu_keys,
       smc_fan_keys: smc_sensors.fan_keys,
+      prev_swapped: None,
     })
   }
 
@@ -504,10 +557,35 @@ impl Sampler {
     fans
   }
 
-  fn get_mem(&mut self) -> WithError<MemMetrics> {
+  /// Memory metrics, the swap rates over `elapsed` since the previous call (zero on the first).
+  fn get_mem(&mut self, elapsed: Duration) -> WithError<MemMetrics> {
     let (ram_usage, ram_total) = libc_ram()?;
     let (swap_usage, swap_total) = libc_swap()?;
-    Ok(MemMetrics { ram_total, ram_usage, swap_total, swap_usage })
+    let ram = libc_ram_breakdown()?;
+
+    let swapped = (ram.swapped_in, ram.swapped_out);
+    let (swap_in_rate, swap_out_rate) = match self.prev_swapped.replace(swapped) {
+      Some(prev) => (
+        per_second(swapped.0.saturating_sub(prev.0), elapsed),
+        per_second(swapped.1.saturating_sub(prev.1), elapsed),
+      ),
+      None => (0, 0),
+    };
+
+    Ok(MemMetrics {
+      ram_total,
+      ram_usage,
+      swap_total,
+      swap_usage,
+      ram_wired: ram.wired,
+      ram_app: ram.app,
+      ram_compressed: ram.compressed,
+      ram_compressed_data: ram.compressed_data,
+      ram_cached: ram.cached,
+      pressure: sysctl_mem_pressure().and_then(MemPressure::from_level),
+      swap_in_rate,
+      swap_out_rate,
+    })
   }
 
   fn get_sys_power(&mut self) -> WithError<f32> {
@@ -624,7 +702,7 @@ impl Sampler {
     let (sample, elapsed) = self.ior.get_sample_interval(duration);
     let mut rs = aggregate_ioreport_metrics(self.get_ioreport_metrics(sample, elapsed)?, &self.soc);
 
-    rs.memory = self.get_mem()?;
+    rs.memory = self.get_mem(elapsed)?;
     rs.temp = self.get_temp()?;
     rs.fans = self.get_fans();
 
@@ -645,13 +723,29 @@ impl Sampler {
 #[cfg(test)]
 mod tests {
   use std::collections::{HashMap, HashSet};
+  use std::time::Duration;
 
   use super::{
-    CpuCoreKind, CpuCoreMetrics, Metrics, PowerSources, TempMetrics, aggregate_ioreport_metrics,
-    calc_freq_from_residencies, collect_cpu_core_metrics, parse_cpu_core_channel,
-    smc_numeric_value, temperature_average,
+    CpuCoreKind, CpuCoreMetrics, MemPressure, Metrics, PowerSources, TempMetrics,
+    aggregate_ioreport_metrics, calc_freq_from_residencies, collect_cpu_core_metrics,
+    parse_cpu_core_channel, per_second, smc_numeric_value, temperature_average,
   };
   use crate::sources::SocInfo;
+
+  #[test]
+  fn mem_pressure_maps_the_kernel_levels() {
+    let levels = [0, 1, 2, 3, 4, 5].map(MemPressure::from_level);
+    let (normal, warning, critical) =
+      (Some(MemPressure::Normal), Some(MemPressure::Warning), Some(MemPressure::Critical));
+    assert_eq!(levels, [None, normal, warning, None, critical, None]);
+  }
+
+  #[test]
+  fn swap_rates_are_per_second_of_the_interval() {
+    assert_eq!(per_second(3 << 20, Duration::from_millis(500)), 6 << 20);
+    assert_eq!(per_second(1000, Duration::from_secs(3)), 333);
+    assert_eq!(per_second(1000, Duration::ZERO), 0);
+  }
 
   #[test]
   fn ane_power_uses_pmp_only_when_energy_model_is_absent() {

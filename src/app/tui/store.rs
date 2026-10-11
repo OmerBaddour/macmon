@@ -1,6 +1,6 @@
 //! Metric history stores used by the terminal UI.
 
-use macmon::{FanMetric, MemMetrics, Metrics, SocInfo};
+use macmon::{FanMetric, MemMetrics, MemPressure, Metrics, SocInfo};
 
 use crate::config::RatioMode;
 
@@ -142,25 +142,32 @@ impl PowerStore {
   }
 }
 
-/// Latest RAM / SWAP usage with the RAM usage history (bytes, newest first).
+/// Latest memory sample with the RAM usage history (bytes, newest first) and the memory pressure
+/// at each of its samples.
 #[derive(Debug, Default)]
 pub(super) struct MemoryStore {
   pub(super) items: Vec<u64>,
+  pub(super) pressures: Vec<Option<MemPressure>>,
   pub(super) ram_usage: u64,
   pub(super) ram_total: u64,
   pub(super) swap_usage: u64,
   pub(super) swap_total: u64,
+  /// The latest sample, for the RAM breakdown, pressure and swap rates.
+  pub(super) last: MemMetrics,
 }
 
 impl MemoryStore {
   pub(super) fn push(&mut self, value: MemMetrics) {
     self.items.insert(0, value.ram_usage);
     self.items.truncate(HISTORY_LEN);
+    self.pressures.insert(0, value.pressure);
+    self.pressures.truncate(HISTORY_LEN);
 
     self.ram_usage = value.ram_usage;
     self.ram_total = value.ram_total;
     self.swap_usage = value.swap_usage;
     self.swap_total = value.swap_total;
+    self.last = value;
   }
 }
 
@@ -278,7 +285,7 @@ mod tests {
     for i in 0..HISTORY_LEN + 10 {
       power.push(i as f64);
       freq.push(FreqSample::new(1000, 0.25, 0.5));
-      mem.push(MemMetrics { ram_total: 100, ram_usage: i as u64, swap_total: 0, swap_usage: 0 });
+      mem.push(MemMetrics { ram_total: 100, ram_usage: i as u64, ..Default::default() });
       temp.push(Some(i as f32 + 1.0));
     }
 
@@ -286,6 +293,7 @@ mod tests {
     let last = HISTORY_LEN as u64 + 9;
     assert_eq!((power.items.len(), power.items[0]), (HISTORY_LEN, last * 1000));
     assert_eq!((mem.items.len(), mem.items[0]), (HISTORY_LEN, last));
+    assert_eq!(mem.pressures.len(), HISTORY_LEN);
     for mode in [RatioMode::Scaled, RatioMode::Active] {
       assert_eq!(freq.ratio(mode).items.len(), HISTORY_LEN, "{mode:?}");
     }

@@ -387,6 +387,22 @@ pub fn libc_ram() -> WithError<(u64, u64)> {
     }
   }
 
+  let (stats, page_size) = vm_stats()?;
+  usage = (stats.active_count as u64
+    + stats.inactive_count as u64
+    + stats.wire_count as u64
+    + stats.speculative_count as u64
+    + stats.compressor_page_count as u64
+    - stats.purgeable_count as u64
+    - stats.external_page_count as u64)
+    * page_size;
+
+  Ok((usage, total))
+}
+
+/// Virtual memory statistics of `host_statistics64(HOST_VM_INFO64)` (what `vm_stat` prints) and
+/// the page size in bytes.
+fn vm_stats() -> WithError<(libc::vm_statistics64, u64)> {
   unsafe {
     let mut count: u32 = libc::HOST_VM_INFO64_COUNT as _;
     let mut stats = std::mem::zeroed::<libc::vm_statistics64>();
@@ -404,19 +420,50 @@ pub fn libc_ram() -> WithError<(u64, u64)> {
       return Err("Failed to get memory stats".into());
     }
 
-    let page_size_kb = libc::sysconf(libc::_SC_PAGESIZE) as u64;
-
-    usage = (stats.active_count as u64
-      + stats.inactive_count as u64
-      + stats.wire_count as u64
-      + stats.speculative_count as u64
-      + stats.compressor_page_count as u64
-      - stats.purgeable_count as u64
-      - stats.external_page_count as u64)
-      * page_size_kb;
+    Ok((stats, libc::sysconf(libc::_SC_PAGESIZE) as u64))
   }
+}
 
-  Ok((usage, total))
+/// Physical memory by kind, in bytes, as Activity Monitor splits it, and the swap traffic since
+/// boot.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RamBreakdown {
+  /// Pinned memory that can't be compressed or swapped: the kernel and GPU buffers.
+  pub wired: u64,
+  /// Anonymous memory of processes, without the purgeable part.
+  pub app: u64,
+  /// RAM the compressor occupies.
+  pub compressed: u64,
+  /// Data stored in the compressor, before compression.
+  pub compressed_data: u64,
+  /// Copies of files and purgeable memory, dropped whenever the memory is needed.
+  pub cached: u64,
+  /// Bytes swapped in since boot.
+  pub swapped_in: u64,
+  /// Bytes swapped out since boot.
+  pub swapped_out: u64,
+}
+
+/// Read the kinds of physical memory and the swap traffic via mach APIs.
+pub fn libc_ram_breakdown() -> WithError<RamBreakdown> {
+  let (stats, page_size) = vm_stats()?;
+  let bytes = |pages: u64| pages * page_size;
+  let purgeable = u64::from(stats.purgeable_count);
+  Ok(RamBreakdown {
+    wired: bytes(u64::from(stats.wire_count)),
+    app: bytes(u64::from(stats.internal_page_count).saturating_sub(purgeable)),
+    compressed: bytes(u64::from(stats.compressor_page_count)),
+    compressed_data: bytes(stats.total_uncompressed_pages_in_compressor),
+    cached: bytes(u64::from(stats.external_page_count) + purgeable),
+    swapped_in: bytes(stats.swapins),
+    swapped_out: bytes(stats.swapouts),
+  })
+}
+
+/// Memory pressure level of the kernel (`kern.memorystatus_vm_pressure_level`), the one Activity
+/// Monitor shows: 1 normal, 2 warning, 4 critical.
+pub fn sysctl_mem_pressure() -> Option<u32> {
+  sysctl_u32("kern.memorystatus_vm_pressure_level")
 }
 
 /// Read used and total swap in bytes via libc sysctl.

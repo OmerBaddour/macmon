@@ -1,13 +1,18 @@
 //! Metrics box (the metric boxes of the original macmon: CPU clusters, GPU, RAM, CPU / GPU / ANE
 //! power) and the box frame it shares with the process list: rounded borders, titles fitted on
 //! the top border, a text and the key hints on the bottom border.
+//!
+//! The RAM box goes further than the original: a bar of the kinds of RAM (wired / app /
+//! compressed / cached, as Activity Monitor splits it), the history colored by memory pressure,
+//! the pressure on the top border, and the legend and swap rates on its bottom border.
 
 use std::ops::Range;
 
+use macmon::MemPressure;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType};
 
@@ -15,8 +20,11 @@ use super::App;
 use super::layout::{LayoutPlan, Metric};
 use super::proc_view::{ELLIPSIS, head};
 use super::store::{FreqStore, PowerStore, ratio};
-use super::theme::{self, dim, gradient, heading, text};
-use super::widgets::{Gauge, Graph};
+use super::theme::{
+  self, RAM_APP, RAM_CACHED, RAM_COMPRESSED, RAM_WIRED, dim, gradient, heading, pressure_color,
+  text,
+};
+use super::widgets::{Gauge, Graph, SegmentBar};
 use crate::config::ViewType;
 
 /// Bytes in a GiB, the unit of the RAM box title.
@@ -25,6 +33,9 @@ const GIB: f64 = (1u64 << 30) as f64;
 const SEPARATOR: &str = " | ";
 /// Fewest cells worth a text on the left of a bottom border; with less room it is left out.
 const BORDER_TEXT_MIN: u16 = 8;
+/// Swap traffic (in and out, bytes per second) from which the swap part of the RAM title is red
+/// instead of yellow: 10 MiB/s.
+const SWAP_RED_RATE: u64 = 10 << 20;
 
 /// Temperature position on the load gradient: 30 °C is cool, 100 °C is hot.
 fn temp_ratio(celsius: f32) -> f64 {
@@ -270,6 +281,15 @@ pub(super) fn render_bottom_border(
 
 // MARK: Metric boxes
 
+/// `normal` / `warning` / `critical`.
+fn pressure_label(pressure: MemPressure) -> &'static str {
+  match pressure {
+    MemPressure::Normal => "normal",
+    MemPressure::Warning => "warning",
+    MemPressure::Critical => "critical",
+  }
+}
+
 /// How a metric box draws its history.
 enum Scale {
   /// A load (CPU cluster, GPU, RAM): the graph is scaled to `max` and colored by load, and `v`
@@ -278,6 +298,9 @@ enum Scale {
   /// Power: the graph is scaled to its largest visible sample, in the low load color, as in the
   /// original; no gauge.
   Power,
+  /// RAM: the bar of the kinds of RAM on the top row over the history scaled to `max`, each sample
+  /// in its color (the pressure at the time); `v` switches to the bar over the whole box.
+  Ram { max: u64, colors: Vec<Color> },
 }
 
 /// Titles and graph of one metric box.
@@ -334,6 +357,18 @@ impl App {
         }
         Scale::Load { max, .. } => f.render_widget(graph.max(max), inner),
         Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
+        Scale::Ram { max, colors } => {
+          if self.cfg.view_type == ViewType::Gauge || inner.height < 2 {
+            f.render_widget(self.ram_bar(), inner);
+          } else {
+            f.render_widget(self.ram_bar(), Rect { height: 1, ..inner });
+            let rest = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
+            f.render_widget(graph.max(max).colors(&colors), rest);
+          }
+          if r.height >= 2 {
+            render_bottom_border(f, r, vec![], |room| self.ram_legend(room));
+          }
+        }
       }
     }
 
@@ -425,11 +460,15 @@ impl App {
     }
   }
 
-  /// RAM and swap usage over the RAM usage history scaled to the total RAM, or a gauge. The total
-  /// RAM is in the chip title, so the title shows what is used: `RAM 16.81 GB (70.0%) · SWAP 2.37
-  /// / 3.0 GB`, or the percentages `RAM 70% · SWAP 79%` / `RAM 70% SW 79%` when that doesn't fit
-  /// (without swap only the RAM part). Narrower, the swap part drops whole (`RAM 70%`), then the
-  /// title, so no number is ever cut.
+  /// RAM and swap usage over the RAM bar and usage history (see `Scale::Ram`). The total RAM is in
+  /// the chip title, so the title shows what is used: `RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB`,
+  /// or the percentages `RAM 70% · SWAP 79%` / `RAM 70% SW 79%` when that doesn't fit (without
+  /// swap only the RAM part). Narrower, the swap part drops whole (`RAM 70%`), then the title, so
+  /// no number is ever cut. While the system swaps, the swap part reads `SWAP⇅` / `SW⇅` with its
+  /// numbers yellow, red from `SWAP_RED_RATE`, and in the text color otherwise: the amount in swap
+  /// stays high long after swapping stops, the traffic is what slows the system down. The memory
+  /// pressure goes on the right (`pressure normal`, then just `normal`) as long as it fits with
+  /// any of them.
   fn ram_box(&self) -> MetricBox<'_> {
     let mem = &self.mem;
     let gib = |bytes: u64| bytes as f64 / GIB;
@@ -440,20 +479,119 @@ impl App {
     let mut titles = vec![];
     if mem.swap_total > 0 {
       let (used, total) = (gib(mem.swap_usage), gib(mem.swap_total));
-      let swap = [dim(" · "), heading("SWAP")];
-      let full_swap = [text(format!(" {used:.2} / {total:.1} GB"))];
-      let short_swap = [text(" "), self.percent(ratio(used, total), 0)];
-      titles.push([&full[..], &swap, &full_swap].concat());
+      let traffic = mem.last.swap_in_rate.saturating_add(mem.last.swap_out_rate);
+      let swapping =
+        (traffic > 0).then(|| gradient(if traffic < SWAP_RED_RATE { 0.5 } else { 1.0 }));
+      let mark = |name: &'static str| match swapping {
+        Some(color) => vec![heading(name), Span::styled("⇅", color)],
+        None => vec![heading(name)],
+      };
+      let full_text = format!(" {used:.2} / {total:.1} GB");
+      let full_swap = match swapping {
+        Some(color) => Span::styled(full_text, color),
+        None => text(full_text),
+      };
+      // colored only by the traffic: a full swap that isn't used is no trouble
+      let percent = format!("{:.0}%", ratio(used, total) * 100.0);
+      let percent = match swapping {
+        Some(color) => Span::styled(percent, color),
+        None => text(percent),
+      };
+      let short_swap = [text(" "), percent];
+      let swap = [&[dim(" · ")][..], &mark("SWAP")].concat();
+      titles.push([&full[..], &swap, &[full_swap]].concat());
       titles.push([&short[..], &swap, &short_swap].concat());
-      titles.push([&short[..], &[text(" "), heading("SW")], &short_swap].concat());
+      titles.push([&short[..], &[text(" ")], &mark("SW"), &short_swap].concat());
     } else {
       titles.push(full.into());
     }
     titles.push(short.into());
 
-    let mut titles: Vec<Titles> = titles.into_iter().map(Titles::new).collect();
-    titles.push(Titles::default());
-    MetricBox { titles, data: &mem.items, scale: Scale::Load { max: mem.ram_total, load } }
+    let mut variants = vec![];
+    if let Some(pressure) = mem.last.pressure {
+      let word = Span::styled(pressure_label(pressure), pressure_color(pressure));
+      let long = Line::from(vec![dim("pressure "), word.clone()]);
+      for left in &titles {
+        variants.push(Titles::new(left.clone()).right(long.clone()));
+        variants.push(Titles::new(left.clone()).right(word.clone()));
+      }
+    }
+    variants.extend(titles.into_iter().map(Titles::new));
+    variants.push(Titles::default());
+
+    // samples without a pressure reading take their load color
+    let colors = mem
+      .pressures
+      .iter()
+      .zip(&mem.items)
+      .map(|(pressure, &used)| match pressure {
+        Some(pressure) => pressure_color(*pressure),
+        None => gradient(ratio(used as f64, mem.ram_total as f64)),
+      })
+      .collect();
+    MetricBox {
+      titles: variants,
+      data: &mem.items,
+      scale: Scale::Ram { max: mem.ram_total, colors },
+    }
+  }
+
+  /// The kinds of RAM, `(bytes, color)`: wired, app, compressed and cached.
+  fn ram_kinds(&self) -> [(&'static str, u64, Color); 4] {
+    let m = &self.mem.last;
+    [
+      ("wired", m.ram_wired, RAM_WIRED),
+      ("app", m.ram_app, RAM_APP),
+      ("comp", m.ram_compressed, RAM_COMPRESSED),
+      ("cache", m.ram_cached, RAM_CACHED),
+    ]
+  }
+
+  /// Bar of the kinds of RAM over the total, free RAM blank; without a breakdown (no sample yet),
+  /// the used RAM in its load color.
+  fn ram_bar(&self) -> SegmentBar {
+    let mem = &self.mem;
+    let kinds = self.ram_kinds();
+    let segments = if kinds.iter().all(|&(_, bytes, _)| bytes == 0) {
+      vec![(mem.ram_usage, gradient(ratio(mem.ram_usage as f64, mem.ram_total as f64)))]
+    } else {
+      kinds.iter().map(|&(_, bytes, color)| (bytes, color)).collect()
+    };
+    SegmentBar::new(segments, mem.ram_total)
+  }
+
+  /// Legend of the RAM bar for the bottom border of the RAM box, in GB, each name in its color:
+  /// `wired 3.9 · app 12.8 · comp 2.4 ×3.9 · cache 6.8 GB` (the compression ratio after the
+  /// compressed RAM), or `■3.9 ■12.8 ■2.4 ■6.8`, or `■4 ■13 ■2 ■7`: the first that fits in
+  /// `room`. Nothing without a breakdown.
+  fn ram_legend(&self, room: usize) -> Vec<Span<'static>> {
+    let kinds = self.ram_kinds();
+    if kinds.iter().all(|&(_, bytes, _)| bytes == 0) {
+      return vec![];
+    }
+
+    let gb = |bytes: u64, decimals: usize| format!("{:.decimals$}", bytes as f64 / GIB);
+    let m = &self.mem.last;
+    let mut full = vec![];
+    let (mut short, mut shortest) = (vec![], vec![]);
+    for (i, &(name, bytes, color)) in kinds.iter().enumerate() {
+      if i > 0 {
+        full.push(dim(" · "));
+        short.push(text(" "));
+        shortest.push(text(" "));
+      }
+      full.extend([Span::styled(name, color), text(format!(" {}", gb(bytes, 1)))]);
+      if name == "comp" && m.ram_compressed > 0 {
+        let factor = m.ram_compressed_data as f64 / m.ram_compressed as f64;
+        full.push(dim(format!(" ×{factor:.1}")));
+      }
+      short.extend([Span::styled("■", color), text(gb(bytes, 1))]);
+      shortest.extend([Span::styled("■", color), text(gb(bytes, 0))]);
+    }
+    full.push(dim(" GB"));
+
+    let fits = |spans: &Vec<Span>| spans.iter().map(Span::width).sum::<usize>() <= room;
+    [full, short].into_iter().find(fits).unwrap_or(shortest)
   }
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when

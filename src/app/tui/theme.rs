@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 
+use macmon::MemPressure;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
@@ -15,6 +16,13 @@ pub(super) const TEXT: Color = Color::Reset;
 /// Selected process row: reverse video over the default colors, so the row reads as one bar
 /// instead of reversing each load color in it.
 pub(super) const SELECTED: Style = Style::new().fg(TEXT).add_modifier(Modifier::REVERSED);
+
+/// Kinds of RAM in the RAM bar and its legend: wired magenta, app blue, compressed cyan, cached
+/// bright black (ANSI 5, 4, 6, 8); free RAM stays blank.
+pub(super) const RAM_WIRED: Color = Color::Magenta;
+pub(super) const RAM_APP: Color = Color::Blue;
+pub(super) const RAM_COMPRESSED: Color = Color::Cyan;
+pub(super) const RAM_CACHED: Color = Color::DarkGray;
 
 /// Steps of the load gradient: green up to `GREEN_MAX`, yellow up to `YELLOW_MAX`, red above.
 const GREEN_MAX: f64 = 1.0 / 3.0;
@@ -49,6 +57,15 @@ pub(super) fn gradient(t: f64) -> Color {
     Color::Yellow
   } else {
     Color::Red
+  }
+}
+
+/// Memory pressure in the load colors: normal green, warning yellow, critical red.
+pub(super) fn pressure_color(pressure: MemPressure) -> Color {
+  match pressure {
+    MemPressure::Normal => Color::Green,
+    MemPressure::Warning => Color::Yellow,
+    MemPressure::Critical => Color::Red,
   }
 }
 

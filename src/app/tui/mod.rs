@@ -523,7 +523,7 @@ mod tests {
   use std::sync::{Arc, Mutex, RwLock, mpsc};
   use std::time::Duration;
 
-  use macmon::{FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
+  use macmon::{FanMetric, MemMetrics, MemPressure, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::{Buffer, CellDiffOption};
@@ -531,7 +531,7 @@ mod tests {
   use ratatui::crossterm::event::{
     EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
   };
-  use ratatui::layout::Margin;
+  use ratatui::layout::{Margin, Rect};
 
   use super::layout::Metric;
   use super::theme::gradient;
@@ -582,6 +582,7 @@ mod tests {
         ram_usage: 20 << 30,
         swap_total: 2 << 30,
         swap_usage: 1 << 30,
+        ..Default::default()
       },
       fans: vec![FanMetric { name: "fan0".to_string(), rpm: 1200, max_rpm: Some(6000) }],
       ecpu_freq_mhz: 1800,
@@ -1148,6 +1149,7 @@ mod tests {
           ram_usage: (16.81 * GIB) as u64,
           swap_total: if swap { 3 << 30 } else { 0 },
           swap_usage: if swap { (2.37 * GIB) as u64 } else { 0 },
+          ..Default::default()
         }
       })
     };
@@ -1176,6 +1178,120 @@ mod tests {
         assert_eq!(top, format!("╭{title}{dashes}╮"), "swap {has_swap} at {width}");
       }
     }
+  }
+
+  /// `test_app` with the memory of a machine under pressure: 64 GB with 38 GB wired, 5 GB of apps,
+  /// 14 GB of compressor holding 30 GB, 3.5 GB cached, and swapping.
+  fn pressured_app(pressure: Option<MemPressure>) -> App {
+    test_app_with(|m| {
+      m.memory = MemMetrics {
+        ram_total: 64 << 30,
+        ram_usage: 57 << 30,
+        swap_total: 11 << 30,
+        swap_usage: 10 << 30,
+        ram_wired: 38 << 30,
+        ram_app: 5 << 30,
+        ram_compressed: 14 << 30,
+        ram_compressed_data: 30 << 30,
+        ram_cached: (3.5 * (1u64 << 30) as f64) as u64,
+        pressure,
+        swap_in_rate: 1258291,
+        swap_out_rate: 0,
+      }
+    })
+  }
+
+  /// Area of the metric box `metric` in a rendered frame.
+  fn box_area(app: &App, buf: &Buffer, metric: Metric) -> Rect {
+    let boxes = app.layout(buf.area).boxes;
+    boxes.into_iter().find(|(m, _)| *m == metric).expect("metric box").1
+  }
+
+  #[test]
+  fn ram_box_shows_the_kinds_of_ram_and_the_pressure() {
+    use ratatui::style::Color;
+
+    let mut app = pressured_app(Some(MemPressure::Warning));
+    let buf = render_buffer(&mut app, 200, 50);
+    let area = box_area(&app, &buf, Metric::Ram);
+    let line =
+      |y: u16| -> String { (area.left()..area.right()).map(|x| buf[(x, y)].symbol()).collect() };
+
+    // the pressure right on the top border, in its color; the percentages make room for it. 1.2
+    // MB/s swapped in: `SWAP⇅` with its numbers yellow
+    let top = line(area.y);
+    assert!(top.starts_with("╭─ RAM 89% · SWAP⇅ 91% ─") && top.ends_with("─ pressure warning ─╮"));
+    for word in ["warning", "⇅", "91%"] {
+      let x = area.left() + x_of(&top, word);
+      assert_eq!(buf[(x, area.y)].fg, Color::Yellow, "{word}");
+    }
+
+    // the bar on the top row: 60.5 of 64 GB over 48 cells is 45 cells, wired / app / compressed /
+    // cached by the running sum (28.5, 32.25, 42.75, 45.4 rounded), the free rest blank
+    let y = area.y + 1;
+    let inner = area.left() + 1..area.right() - 1;
+    let fg: Vec<Color> = inner.clone().map(|x| buf[(x, y)].fg).collect();
+    let mut expected = vec![Color::Magenta; 29];
+    expected
+      .extend([vec![Color::Blue; 3], vec![Color::Cyan; 11], vec![Color::DarkGray; 2]].concat());
+    assert_eq!(&fg[..45], &expected[..]);
+    assert_eq!(line(y).matches('█').count(), 45);
+
+    // the history under it in the pressure color
+    let graph_row = area.bottom() - 2;
+    assert_eq!(buf[(inner.end - 1, graph_row)].fg, Color::Yellow);
+
+    // the legend on the bottom border, swapping or not
+    let bottom = line(area.bottom() - 1);
+    assert_eq!(bottom, format!("╰─ ■38.0 ■5.0 ■14.0 ■3.5 {}╯", "─".repeat(24)));
+
+    // 10 MiB/s swapped out: red; no swapping: plain `SWAP` in the text color, however full
+    for (rate, title, color) in [(10 << 20, "SWAP⇅ 91%", Color::Red), (0, "SWAP 91%", Color::Reset)]
+    {
+      let pressured = pressured_app(Some(MemPressure::Warning));
+      let mut app = pressured_app(Some(MemPressure::Warning));
+      app.update_metrics(Metrics {
+        memory: MemMetrics { swap_in_rate: 0, swap_out_rate: rate, ..pressured.mem.last },
+        ..test_metrics()
+      });
+      let buf = render_buffer(&mut app, 200, 50);
+      let top: String = (area.left()..area.right()).map(|x| buf[(x, area.y)].symbol()).collect();
+      assert!(top.contains(&format!("· {title} ─")), "{top}");
+      let x = area.left() + x_of(&top, "91%");
+      assert_eq!(buf[(x, area.y)].fg, color, "{rate}");
+    }
+
+    // `v`: the bar over the whole box
+    app.cfg.view_type = crate::config::ViewType::Gauge;
+    let buf = render_buffer(&mut app, 200, 50);
+    for y in area.y + 1..area.bottom() - 1 {
+      let cells: String = inner.clone().map(|x| buf[(x, y)].symbol()).collect();
+      assert_eq!(cells.matches('█').count(), 45, "row {y}");
+    }
+  }
+
+  #[test]
+  fn ram_legend_spells_the_kinds_out_when_it_fits() {
+    // not swapping, in a wide box: the names in full with the compression ratio
+    let mut app = pressured_app(Some(MemPressure::Normal));
+    app.update_metrics(Metrics {
+      memory: MemMetrics { swap_in_rate: 0, ..pressured_app(None).mem.last },
+      ..test_metrics()
+    });
+    let buf = render_buffer(&mut app, 400, 50);
+    let area = box_area(&app, &buf, Metric::Ram);
+    let y = area.bottom() - 1;
+    let bottom: String = (area.left()..area.right()).map(|x| buf[(x, y)].symbol()).collect();
+    let legend = "wired 38.0 · app 5.0 · comp 14.0 ×2.1 · cache 3.5 GB";
+    assert!(bottom.starts_with(&format!("╰─ {legend} ─")), "{bottom}");
+    assert!(bottom.ends_with("───╯"), "{bottom}");
+
+    // narrow: whole GB
+    let buf = render_buffer(&mut app, 80, 24);
+    let area = box_area(&app, &buf, Metric::Ram);
+    let y = area.bottom() - 1;
+    let bottom: String = (area.left()..area.right()).map(|x| buf[(x, y)].symbol()).collect();
+    assert!(bottom.starts_with("╰─ ■38 ■5 ■14 ■4 ─"), "{bottom}");
   }
 
   #[test]
