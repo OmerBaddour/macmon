@@ -790,7 +790,7 @@ mod tests {
     }
 
     // `]` / `[` step the process list interval by 500 ms; `interval` is left alone
-    for (c, proc_interval) in [(']', 3500), ('[', 3000), ('[', 2500)] {
+    for (c, proc_interval) in [(']', 5500), ('[', 5000), ('[', 4500)] {
       assert!(app.handle_key(key(c)).is_continue());
       let saved = (app.cfg.proc_interval(), file.saved()["proc_interval"].clone());
       assert_eq!(saved, (proc_interval, proc_interval.into()), "{c}");
@@ -809,7 +809,7 @@ mod tests {
       assert_eq!(cells, line, "row {y}");
     }
     // the key hints show the settings
-    let hints = " v gauge | r active | -/+ 1250ms | [/] 2500ms ─╯";
+    let hints = " v gauge | r active | -/+ 1250ms | [/] 4500ms ─╯";
     assert!(row(&buf, 49).ends_with(hints), "{}", row(&buf, 49));
 
     assert!(app.handle_key(key('v')).is_continue());

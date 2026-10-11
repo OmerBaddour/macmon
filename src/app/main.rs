@@ -132,7 +132,7 @@ struct Cli {
   interval: u32,
 
   /// Process list refresh interval in milliseconds, independent from `--interval`
-  #[arg(short = 'I', long = "proc-interval", default_value_t = 3000)]
+  #[arg(short = 'I', long = "proc-interval", default_value_t = 5000)]
   proc_interval: u32,
 }
 

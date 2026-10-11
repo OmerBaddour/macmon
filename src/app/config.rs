@@ -73,7 +73,7 @@ pub struct Config {
 
   /// Saved process list interval in milliseconds, independent from `interval`; `proc_interval()`
   /// is the one in use.
-  #[serde_inline_default(3000)]
+  #[serde_inline_default(5000)]
   proc_interval: u32,
 
   #[serde_inline_default(RatioMode::Scaled)]
@@ -427,18 +427,18 @@ mod tests {
   fn proc_interval_steps_and_saves_independently_from_the_interval() {
     let file = TempConfig::new("proc_interval_steps_and_saves");
     let mut cfg = Config::load_from(Some(file.path()));
-    assert_eq!((cfg.interval(), cfg.proc_interval()), (1000, 3000));
+    assert_eq!((cfg.interval(), cfg.proc_interval()), (1000, 5000));
 
     // `[` / `]` step the process list interval by 500 ms and never touch `interval`
     cfg.dec_proc_interval();
-    assert_eq!((file.saved()["proc_interval"].clone(), cfg.proc_interval()), (2500.into(), 2500));
+    assert_eq!((file.saved()["proc_interval"].clone(), cfg.proc_interval()), (4500.into(), 4500));
     assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (1000.into(), 1000));
     cfg.inc_proc_interval();
     cfg.inc_proc_interval();
-    assert_eq!(cfg.proc_interval(), 3500);
+    assert_eq!(cfg.proc_interval(), 5500);
 
     // clamped like the other intervals, including a saved value out of range
-    for _ in 0..8 {
+    for _ in 0..12 {
       cfg.dec_proc_interval();
     }
     assert_eq!(cfg.proc_interval(), 250);
