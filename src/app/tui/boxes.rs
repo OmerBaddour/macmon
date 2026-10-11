@@ -9,8 +9,9 @@
 //!
 //! The CPU box shows the whole CPU, the clusters on its bottom border.
 //!
-//! The network box shows download over upload, both graphs on one scale so they compare, with the
-//! current rates on the top border and the peaks on screen on the bottom border.
+//! The disk and network boxes show two rates one over the other (reads over writes, download over
+//! upload), both graphs on one scale so they compare, with the current rates on the top border and
+//! the peaks on screen on the bottom border.
 
 use std::ops::Range;
 
@@ -25,10 +26,10 @@ use ratatui::widgets::{Block, BorderType};
 use super::App;
 use super::layout::{LayoutPlan, Metric};
 use super::proc_view::{ELLIPSIS, head};
-use super::store::{FreqStore, PowerStore, ratio};
+use super::store::{FreqStore, PowerStore, RateStore, ratio};
 use super::theme::{
-  self, NET_RX, NET_TX, RAM_APP, RAM_CACHED, RAM_COMPRESSED, RAM_WIRED, dim, gradient, heading,
-  pressure_color, text,
+  self, DISK_READ, DISK_WRITE, NET_RX, NET_TX, RAM_APP, RAM_CACHED, RAM_COMPRESSED, RAM_WIRED, dim,
+  gradient, heading, pressure_color, text,
 };
 use super::widgets::{Graph, SegmentBar};
 
@@ -41,9 +42,22 @@ const BORDER_TEXT_MIN: u16 = 8;
 /// Swap traffic (in and out, bytes per second) from which the swap part of the RAM title is red
 /// instead of yellow: 10 MiB/s.
 const SWAP_RED_RATE: u64 = 10 << 20;
-/// Lowest full height of the network graphs, in bytes per second: background traffic of a few
-/// KB/s stays flat instead of filling the box.
-const NET_MIN_SCALE: u64 = 1_000_000;
+/// Lowest full height of the disk and network graphs, in bytes per second: background traffic of
+/// a few KB/s stays flat instead of filling the box.
+const RATE_MIN_SCALE: u64 = 1_000_000;
+
+/// Name and marks of a box of two rates: the mark of each rate (an arrow or a letter) in the color
+/// of its graph.
+struct Rates {
+  name: &'static str,
+  upper: (&'static str, Color),
+  lower: (&'static str, Color),
+}
+
+/// Disk box: reads over writes.
+const DISK: Rates = Rates { name: "DISK", upper: ("R", DISK_READ), lower: ("W", DISK_WRITE) };
+/// Network box: download over upload.
+const NET: Rates = Rates { name: "NET", upper: ("↓", NET_RX), lower: ("↑", NET_TX) };
 
 /// `bytes_per_sec` in decimal units, as Activity Monitor shows network rates, with 3 significant
 /// digits at most: `512 B/s`, `1.5 KB/s`, `12.3 MB/s`, `123 MB/s`. `short` gives `512B`, `1.5K`,
@@ -321,7 +335,7 @@ fn pressure_label(pressure: MemPressure) -> &'static str {
 }
 
 /// How a metric box draws its history.
-enum Scale {
+enum Scale<'a> {
   /// A load (CPU, GPU): the graph is scaled to `max` and colored by load.
   Load { max: u64 },
   /// Power: the graph is scaled to its largest visible sample, in the low load color, as in the
@@ -330,8 +344,8 @@ enum Scale {
   /// RAM: the bar of the kinds of RAM on the top row over the history scaled to `max`, each sample
   /// in its color (the pressure at the time); with a single row, the bar alone.
   Ram { max: u64, colors: Vec<Color> },
-  /// Network: download over upload (see `render_net_graphs`).
-  Net,
+  /// Two rates one over the other (see `render_rate_graphs`).
+  Rates { store: &'a RateStore, marks: &'static Rates },
 }
 
 /// Titles and graph of one metric box.
@@ -340,7 +354,7 @@ struct MetricBox<'a> {
   titles: Vec<Titles<'static>>,
   /// History, newest first.
   data: &'a [u64],
-  scale: Scale,
+  scale: Scale<'a>,
 }
 
 impl App {
@@ -384,10 +398,10 @@ impl App {
       match metric.scale {
         Scale::Load { max } => f.render_widget(graph.max(max), inner),
         Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
-        Scale::Net => {
-          self.render_net_graphs(f, inner);
+        Scale::Rates { store, marks } => {
+          self.render_rate_graphs(f, inner, store, marks);
           if r.height >= 2 {
-            render_bottom_border(f, r, vec![], |room| self.net_peaks(inner.width, room));
+            render_bottom_border(f, r, vec![], |room| rate_peaks(store, marks, inner.width, room));
           }
         }
         Scale::Ram { max, colors } => {
@@ -474,7 +488,8 @@ impl App {
       Metric::Ram => self.ram_box(),
       Metric::CpuPower => self.power_box("CPU", &self.cpu_power, self.cpu_temp.last()),
       Metric::GpuPower => self.power_box("GPU", &self.gpu_power, self.gpu_temp.last()),
-      Metric::Network => self.net_box(),
+      Metric::Disk => rate_box(&self.disk, &DISK),
+      Metric::Network => rate_box(&self.net, &NET),
     }
   }
 
@@ -665,67 +680,17 @@ impl App {
     [full, short].into_iter().find(fits).unwrap_or(shortest)
   }
 
-  /// `NET ↓ 12.3 MB/s ↑ 450 KB/s`, then `↓ 12.3 MB/s ↑ 450 KB/s`, then `↓12.3M ↑450K`: the
-  /// current download and upload rates, the arrows in the colors of their graphs.
-  fn net_box(&self) -> MetricBox<'_> {
-    let last = self.net.last;
-    let arrows = |short: bool| {
-      let gap = if short { "" } else { " " };
-      vec![
-        Span::styled("↓", NET_RX),
-        text(format!("{gap}{}", rate(last.rx_rate, short))),
-        text(" "),
-        Span::styled("↑", NET_TX),
-        text(format!("{gap}{}", rate(last.tx_rate, short))),
-      ]
-    };
-    let full = [&[heading("NET"), text(" ")][..], &arrows(false)].concat();
-
-    let titles = vec![Titles::new(full), Titles::new(arrows(false)), Titles::new(arrows(true))];
-    MetricBox { titles, data: &self.net.rx, scale: Scale::Net }
-  }
-
-  /// Graph scale of the network box `width` columns wide: the larger peak of the two histories on
-  /// screen, at least `NET_MIN_SCALE`.
-  fn net_scale(&self, width: u16) -> u64 {
-    let peak = |data: &[u64]| data.iter().take(usize::from(width)).copied().max().unwrap_or(0);
-    peak(&self.net.rx).max(peak(&self.net.tx)).max(NET_MIN_SCALE)
-  }
-
-  /// Download graph over the upload graph in `area` on one scale (`net_scale`), the download
-  /// graph taking the odd row; with a single row, download only.
-  fn render_net_graphs(&self, f: &mut Frame, area: Rect) {
-    let max = self.net_scale(area.width);
+  /// The upper rate's graph over the lower one's in `area`, on one scale: the larger peak of the
+  /// two on screen, at least `RATE_MIN_SCALE`. The upper graph takes the odd row; with a single
+  /// row, it is alone.
+  fn render_rate_graphs(&self, f: &mut Frame, area: Rect, store: &RateStore, marks: &Rates) {
+    let (upper_peak, lower_peak) = rate_peaks_on_screen(store, area.width);
+    let max = upper_peak.max(lower_peak).max(RATE_MIN_SCALE);
     let graph = |data| Graph::new(data).three_levels(self.three_level_bars).max(max);
     let upper = area.height.div_ceil(2);
-    f.render_widget(graph(&self.net.rx).color(NET_RX), Rect { height: upper, ..area });
+    f.render_widget(graph(&store.upper).color(marks.upper.1), Rect { height: upper, ..area });
     let lower = Rect { y: area.y + upper, height: area.height - upper, ..area };
-    f.render_widget(graph(&self.net.tx).color(NET_TX), lower);
-  }
-
-  /// Peaks of the histories on screen in a network box `width` columns wide, for its bottom
-  /// border: `peak ↓ 98.2 MB/s ↑ 2.1 MB/s`, or `↓98.2M ↑2.1M` when that doesn't fit in `room`.
-  fn net_peaks(&self, width: u16, room: usize) -> Vec<Span<'static>> {
-    let peak = |data: &[u64]| data.iter().take(usize::from(width)).copied().max().unwrap_or(0);
-    let (rx, tx) = (peak(&self.net.rx), peak(&self.net.tx));
-    let full = vec![
-      dim("peak "),
-      Span::styled("↓", NET_RX),
-      text(format!(" {}", rate(rx, false))),
-      text(" "),
-      Span::styled("↑", NET_TX),
-      text(format!(" {}", rate(tx, false))),
-    ];
-    if full.iter().map(Span::width).sum::<usize>() <= room {
-      return full;
-    }
-    vec![
-      Span::styled("↓", NET_RX),
-      text(rate(rx, true)),
-      text(" "),
-      Span::styled("↑", NET_TX),
-      text(rate(tx, true)),
-    ]
+    f.render_widget(graph(&store.lower).color(marks.lower.1), lower);
   }
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when
@@ -754,6 +719,56 @@ impl App {
 
     MetricBox { titles: titles.into(), data: &store.items, scale: Scale::Power }
   }
+}
+
+/// `NET ↓ 12.3 MB/s ↑ 450 KB/s`, then `↓ 12.3 MB/s ↑ 450 KB/s`, then `↓12.3M ↑450K` (`DISK R
+/// 12.3 MB/s W 450 KB/s` for the disk): the current rates, the marks in the colors of their graphs.
+fn rate_box<'a>(store: &'a RateStore, marks: &'static Rates) -> MetricBox<'a> {
+  let (upper, lower) = store.last();
+  let rates = |short: bool| {
+    let gap = if short { "" } else { " " };
+    vec![
+      Span::styled(marks.upper.0, marks.upper.1),
+      text(format!("{gap}{}", rate(upper, short))),
+      text(" "),
+      Span::styled(marks.lower.0, marks.lower.1),
+      text(format!("{gap}{}", rate(lower, short))),
+    ]
+  };
+  let full = [&[heading(marks.name), text(" ")][..], &rates(false)].concat();
+
+  let titles = vec![Titles::new(full), Titles::new(rates(false)), Titles::new(rates(true))];
+  MetricBox { titles, data: &store.upper, scale: Scale::Rates { store, marks } }
+}
+
+/// Peaks of the two histories on screen in a box `width` columns wide.
+fn rate_peaks_on_screen(store: &RateStore, width: u16) -> (u64, u64) {
+  let peak = |data: &[u64]| data.iter().take(usize::from(width)).copied().max().unwrap_or(0);
+  (peak(&store.upper), peak(&store.lower))
+}
+
+/// Peaks on screen in a box of two rates `width` columns wide, for its bottom border: `peak ↓ 98.2
+/// MB/s ↑ 2.1 MB/s`, or `↓98.2M ↑2.1M` when that doesn't fit in `room`.
+fn rate_peaks(store: &RateStore, marks: &Rates, width: u16, room: usize) -> Vec<Span<'static>> {
+  let (upper, lower) = rate_peaks_on_screen(store, width);
+  let full = vec![
+    dim("peak "),
+    Span::styled(marks.upper.0, marks.upper.1),
+    text(format!(" {}", rate(upper, false))),
+    text(" "),
+    Span::styled(marks.lower.0, marks.lower.1),
+    text(format!(" {}", rate(lower, false))),
+  ];
+  if full.iter().map(Span::width).sum::<usize>() <= room {
+    return full;
+  }
+  vec![
+    Span::styled(marks.upper.0, marks.upper.1),
+    text(rate(upper, true)),
+    text(" "),
+    Span::styled(marks.lower.0, marks.lower.1),
+    text(rate(lower, true)),
+  ]
 }
 
 #[cfg(test)]

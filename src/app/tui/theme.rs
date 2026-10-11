@@ -28,6 +28,11 @@ pub(super) const RAM_CACHED: Color = Color::DarkGray;
 pub(super) const NET_RX: Color = Color::Cyan;
 pub(super) const NET_TX: Color = Color::Magenta;
 
+/// Disk graphs and their letters in the colors of the network: reads (data in) cyan, writes (data
+/// out) magenta.
+pub(super) const DISK_READ: Color = NET_RX;
+pub(super) const DISK_WRITE: Color = NET_TX;
+
 /// Steps of the load gradient: green up to `GREEN_MAX`, yellow up to `YELLOW_MAX`, red above.
 const GREEN_MAX: f64 = 1.0 / 3.0;
 const YELLOW_MAX: f64 = 2.0 / 3.0;

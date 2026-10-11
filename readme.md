@@ -22,6 +22,7 @@
 - 📊 CPU frequency-scaled and active ratios per cluster
 - 💾 RAM / Swap usage, with wired / app / compressed / cached RAM, memory pressure and swap rates
 - 🌐 Network download / upload throughput
+- 💽 Disk read / write throughput
 - 📈 Historical charts with average and max values
 - 🌡️ Average CPU / GPU temperature
 - 📋 Process list with per-process CPU, memory, power, GPU usage and network download / upload
@@ -232,6 +233,10 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
     "rx_rate": 1843200, // Bytes received per second, without loopback, tunnels and bridges
     "tx_rate": 40960, // Bytes sent per second
   },
+  "disk": {
+    "read_rate": 5242880, // Bytes read per second, without disk images
+    "write_rate": 1048576, // Bytes written per second
+  },
   "fans": [
     { "name": "fan0", "rpm": 999, "max_rpm": 4900 },
     { "name": "fan1", "rpm": 1200, "max_rpm": 5200 },
@@ -290,6 +295,12 @@ Examples:
 - Full interval at half the maximum frequency → `active = 1.0`, `scaled = 0.5`.
 - Half the interval at the maximum frequency → `active = 0.5`, `scaled = 0.5`.
 - One of ten cores working at maximum frequency → cluster `active = scaled = 0.1`.
+
+### Disk throughput
+
+Disk rates come from the `Statistics` of each `IOBlockStorageDriver` in the IORegistry, as `iostat` reads them: physical bytes moved to and from every disk, external ones included, so reads served from the file cache don't count. Disk images are left out, because their reads and writes reach the disk holding the image file too.
+
+There is no per-process disk I/O: it needs root. The counters exist (`ri_diskio_bytesread` / `ri_diskio_byteswritten` from `proc_pid_rusage`), but macOS returns `EPERM` for processes of other users, including root daemons such as `kernel_task`, `mds_stores` and `backupd`, which do much of the disk I/O. Unlike CPU time (the setuid `/bin/ps`) and network traffic (`nettop`), no rootless tool reports it for them either: `ps` and `nettop` don't have it, and `fs_usage` and `iotop` need root. Columns for your own processes only would leave the heaviest disk users blank and wouldn't add up to the disk box.
 
 ## 📚 Library usage
 

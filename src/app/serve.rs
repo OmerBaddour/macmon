@@ -69,6 +69,8 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   }
   gauge!(out, "network_receive_bytes_per_second", "Bytes received per second, without loopback, tunnels and bridges", m.network.rx_rate);
   gauge!(out, "network_transmit_bytes_per_second", "Bytes sent per second, without loopback, tunnels and bridges", m.network.tx_rate);
+  gauge!(out, "disk_read_bytes_per_second", "Bytes read from disk per second, without disk images", m.disk.read_rate);
+  gauge!(out, "disk_write_bytes_per_second", "Bytes written to disk per second, without disk images", m.disk.write_rate);
   gauge!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);

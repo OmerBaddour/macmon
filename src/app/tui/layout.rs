@@ -1,12 +1,13 @@
 //! Screen layout: the metric boxes in the top half of the screen and the process list in the
 //! rest.
 //!
-//! The metrics box holds a grid of three columns: CPU, GPU and RAM on top, CPU / GPU power and
-//! network below, so each usage box sits over its power box. Unlike the original, the CPU is one
-//! box (the clusters go on its bottom border), and the ANE power box gave way to the network box:
-//! the ANE is idle most of the time, and its power still counts in the power summary. The boxes of
-//! a row split its width evenly, the rows split the height (the top row gets the odd one). One
-//! structure at every size, only the scale changes.
+//! The metrics box holds a grid of four columns: CPU, GPU and RAM on top, CPU / GPU power, disk
+//! and network below, so each usage box sits over its power box and the RAM box over the two
+//! boxes of data moving: the machine's own first, its traffic with the outside world last. Unlike
+//! the original, the CPU is one box (the clusters go on its bottom border), and the ANE power box
+//! gave way to the network box: the ANE is idle most of the time, and its power still counts in
+//! the power summary. The columns split the width evenly, the rows split the height (the top row
+//! gets the odd one). One structure at every size, only the scale changes.
 //!
 //! A blank row follows each row of boxes and the metrics box, so the text on the bottom border of
 //! one box never sits right on the top border of the next. On small screens the blank rows go
@@ -34,6 +35,7 @@ pub(super) enum Metric {
   Ram,
   CpuPower,
   GpuPower,
+  Disk,
   Network,
 }
 
@@ -49,11 +51,12 @@ pub(super) struct LayoutPlan {
   pub(super) proc: Option<Rect>,
 }
 
-/// Boxes of the top row: CPU, GPU and RAM.
-const TOP_ROW: [Metric; 3] = [Metric::Cpu, Metric::Gpu, Metric::Ram];
+/// Boxes of the top row with the grid columns they span: CPU and GPU one each, RAM two.
+const TOP_ROW: &[(Metric, u16)] = &[(Metric::Cpu, 1), (Metric::Gpu, 1), (Metric::Ram, 2)];
 
-/// Boxes of the bottom row: CPU and GPU power, network.
-const BOTTOM_ROW: [Metric; 3] = [Metric::CpuPower, Metric::GpuPower, Metric::Network];
+/// Boxes of the bottom row with the grid columns they span: CPU and GPU power, disk, network.
+const BOTTOM_ROW: &[(Metric, u16)] =
+  &[(Metric::CpuPower, 1), (Metric::GpuPower, 1), (Metric::Disk, 1), (Metric::Network, 1)];
 
 /// Height of the metrics box over the process list on a screen `height` rows tall:
 /// `METRICS_HEIGHT_PCT` of it, rounded, but at least `METRICS_MIN_HEIGHT`.
@@ -63,15 +66,22 @@ fn metrics_height(height: u16) -> u16 {
   share.max(METRICS_MIN_HEIGHT).min(height)
 }
 
-/// `count` (at least one) boxes side by side splitting the width of `row` evenly; the odd cells
-/// are spread between them. Boxes without cells are left out.
-fn split_row(row: Rect, count: usize) -> impl Iterator<Item = Rect> {
-  let (width, count) = (u64::from(row.width), count as u64);
+/// The `metrics` of a row side by side in `row`, each `span` grid columns wide: the columns split
+/// the width evenly, the odd cells spread between them, so boxes of two rows ending on the same
+/// column line up. Boxes without cells are left out.
+fn split_row(row: Rect, metrics: &[(Metric, u16)]) -> impl Iterator<Item = (Metric, Rect)> {
+  let width = u64::from(row.width);
+  let columns: u64 = metrics.iter().map(|&(_, span)| u64::from(span)).sum();
   // offsets stay within `row.width`, so they fit in u16
-  let edge = move |i: u64| (width * i / count) as u16;
-  (0..count)
-    .map(move |i| Rect { x: row.x + edge(i), width: edge(i + 1) - edge(i), ..row })
-    .filter(|r| !r.is_empty())
+  let edge = move |column: u64| (width * column / columns) as u16;
+  let mut start = 0;
+  let boxes = metrics.iter().map(move |&(metric, span)| {
+    let end = start + u64::from(span);
+    let x = edge(start);
+    start = end;
+    (metric, Rect { x: row.x + x, width: edge(end) - x, ..row })
+  });
+  boxes.filter(|(_, r)| !r.is_empty())
 }
 
 /// Whether `area` has room for the process list under the metrics box: at least `PROC_MIN_ROWS`
@@ -114,7 +124,7 @@ pub(super) fn compute_layout(area: Rect, procs: bool) -> LayoutPlan {
     if row.is_empty() {
       continue;
     }
-    plan.boxes.extend(metrics.into_iter().zip(split_row(row, metrics.len())));
+    plan.boxes.extend(split_row(row, metrics));
   }
 
   plan
@@ -149,12 +159,14 @@ mod tests {
     assert_eq!((plan.top, plan.proc), (Some(area), None));
     // 38 rows inside: a blank row under each row of boxes, 18 rows for each
     let rows: Vec<(u16, u16)> = plan.boxes.iter().map(|(_, r)| (r.y, r.height)).collect();
-    assert_eq!(rows, [(1, 18), (1, 18), (1, 18), (20, 18), (20, 18), (20, 18)]);
+    assert_eq!(rows, [(1, 18), (1, 18), (1, 18), (20, 18), (20, 18), (20, 18), (20, 18)]);
 
     // rows of boxes 4 high (2 graph rows) with the blank rows, from 10 rows inside; with 9, none
     let rows = |height| {
       let plan = compute_layout(Rect::new(0, 0, 120, height), false);
-      plan.boxes.iter().map(|(_, r)| (r.y, r.height)).step_by(3).collect::<Vec<_>>()
+      let mut rows: Vec<_> = plan.boxes.iter().map(|(_, r)| (r.y, r.height)).collect();
+      rows.dedup();
+      rows
     };
     assert_eq!(rows(12), [(1, 4), (6, 4)]);
     assert_eq!(rows(11), [(1, 5), (6, 4)]);
@@ -164,6 +176,23 @@ mod tests {
     let plan = compute_layout(small, true);
     assert_eq!((plan.top, plan.proc), (Some(small), None));
     assert!(!procs_fit(small) && procs_fit(Rect { height: 14, ..small }));
+  }
+
+  #[test]
+  fn usage_boxes_line_up_over_their_power_boxes() {
+    use super::Metric::*;
+    for width in [10, 69, 80, 81, 82, 83, 110, 200, 401] {
+      let plan = compute_layout(Rect::new(3, 0, width, 40), false);
+      let span = |metric| {
+        let (_, r) = plan.boxes.iter().find(|(m, _)| *m == metric).expect("box");
+        (r.left(), r.right())
+      };
+      assert_eq!(span(Cpu), span(CpuPower), "{width}");
+      assert_eq!(span(Gpu), span(GpuPower), "{width}");
+      // RAM over disk and network
+      assert_eq!(span(Ram), (span(Disk).0, span(Network).1), "{width}");
+      assert_eq!(span(Disk).1, span(Network).0, "{width}");
+    }
   }
 
   #[test]

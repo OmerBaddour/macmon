@@ -18,5 +18,6 @@ The TUI is in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from 
 
 - Before investigating or changing power sources, read [Power sources and macOS 27](readme.md#power-sources-and-macos-27) and the relevant evidence in [docs/clpc-discovery.md](docs/clpc-discovery.md).
 - Check counter availability before treating zero CPU/ANE readings as zero consumption.
+- Per-process disk I/O needs root (`proc_pid_rusage` returns `EPERM` for other users' processes, and no rootless tool reports it): see [Disk throughput](readme.md#disk-throughput) before revisiting it.
 - Verify CLPC report IDs, CPU/GPU/ANE assignments, and units against an independent reference under separate component loads. Table positions and response to load alone do not establish a mapping.
 - For sampling changes, validate rootless readings with `macmon pipe` on the affected hardware and macOS version. Report runtime results separately from build and unit-test results, and identify untested configurations.

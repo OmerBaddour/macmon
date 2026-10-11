@@ -1,6 +1,6 @@
 //! Metric history stores used by the terminal UI.
 
-use macmon::{FanMetric, MemMetrics, MemPressure, Metrics, NetMetrics, SocInfo};
+use macmon::{FanMetric, MemMetrics, MemPressure, Metrics, SocInfo};
 
 use crate::config::RatioMode;
 
@@ -187,21 +187,25 @@ impl MemoryStore {
   }
 }
 
-/// Network rates (bytes per second) with their histories, newest first.
+/// Two rates (bytes per second) drawn one over the other, with their histories, newest first:
+/// network download over upload, disk reads over writes.
 #[derive(Debug, Default)]
-pub(super) struct NetStore {
-  pub(super) rx: Vec<u64>,
-  pub(super) tx: Vec<u64>,
-  pub(super) last: NetMetrics,
+pub(super) struct RateStore {
+  pub(super) upper: Vec<u64>,
+  pub(super) lower: Vec<u64>,
 }
 
-impl NetStore {
-  pub(super) fn push(&mut self, value: NetMetrics) {
-    self.rx.insert(0, value.rx_rate);
-    self.rx.truncate(HISTORY_LEN);
-    self.tx.insert(0, value.tx_rate);
-    self.tx.truncate(HISTORY_LEN);
-    self.last = value;
+impl RateStore {
+  pub(super) fn push(&mut self, upper: u64, lower: u64) {
+    self.upper.insert(0, upper);
+    self.upper.truncate(HISTORY_LEN);
+    self.lower.insert(0, lower);
+    self.lower.truncate(HISTORY_LEN);
+  }
+
+  /// The latest rates, zero before the first sample.
+  pub(super) fn last(&self) -> (u64, u64) {
+    (self.upper.first().copied().unwrap_or(0), self.lower.first().copied().unwrap_or(0))
   }
 }
 
@@ -279,10 +283,10 @@ pub(super) fn ratio(value: f64, total: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-  use macmon::{MemMetrics, NetMetrics};
+  use macmon::MemMetrics;
 
   use super::{
-    FreqSample, FreqStore, HISTORY_LEN, MAX_TEMPS, MemoryStore, NetStore, PowerStore, STATS_LEN,
+    FreqSample, FreqStore, HISTORY_LEN, MAX_TEMPS, MemoryStore, PowerStore, RateStore, STATS_LEN,
     TempStore,
   };
   use crate::config::RatioMode;
@@ -317,9 +321,9 @@ mod tests {
   fn histories_are_capped() {
     let (mut power, mut freq) = (PowerStore::default(), FreqStore::default());
     let (mut mem, mut temp) = (MemoryStore::default(), TempStore::default());
-    let mut net = NetStore::default();
+    let mut net = RateStore::default();
     for i in 0..HISTORY_LEN + 10 {
-      net.push(NetMetrics { rx_rate: i as u64, tx_rate: 2 * i as u64 });
+      net.push(i as u64, 2 * i as u64);
       power.push(i as f64);
       freq.push(FreqSample::new(1000, 0.25, 0.5));
       mem.push(MemMetrics { ram_total: 100, ram_usage: i as u64, ..Default::default() });
@@ -332,7 +336,7 @@ mod tests {
     assert_eq!((mem.items.len(), mem.items[0]), (HISTORY_LEN, last));
     assert_eq!(mem.pressures.len(), HISTORY_LEN);
     assert_eq!(
-      (net.rx.len(), net.rx[0], net.tx.len(), net.tx[0]),
+      (net.upper.len(), net.upper[0], net.lower.len(), net.lower[0]),
       (HISTORY_LEN, last, HISTORY_LEN, 2 * last)
     );
     for mode in [RatioMode::Scaled, RatioMode::Active] {
