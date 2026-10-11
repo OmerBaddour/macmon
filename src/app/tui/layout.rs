@@ -7,6 +7,10 @@
 //! the ANE is idle most of the time, and its power still counts in the power summary. The boxes of
 //! a row split its width evenly, the rows split the height (the top row gets the odd one). One
 //! structure at every size, only the scale changes.
+//!
+//! A blank row follows each row of boxes and the metrics box, so the text on the bottom border of
+//! one box never sits right on the top border of the next. On small screens the blank rows go
+//! first: before the graphs get shorter than `SPACED_GRAPH_ROWS` or the process list hides.
 
 use ratatui::layout::{Margin, Rect};
 
@@ -19,6 +23,8 @@ const METRICS_MIN_HEIGHT: u16 = 8;
 const PROC_MIN_ROWS: u16 = 3;
 /// Rows of the process box besides the process rows: borders and the table header.
 const PROC_CHROME: u16 = 3;
+/// Fewest graph rows of a metric box with the blank rows; with less room they are left out.
+const SPACED_GRAPH_ROWS: u16 = 2;
 
 /// One box of the metrics box: a title over a history graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,8 +83,9 @@ pub(super) fn procs_fit(area: Rect) -> bool {
 /// Splits `area` into the metrics box and the process box below it.
 ///
 /// With the process list on (`procs`), the metrics box takes `METRICS_HEIGHT_PCT` of the height
-/// and the process box the rest; left with fewer than `PROC_MIN_ROWS` process rows, the process
-/// list is auto-hidden. Without it, the metrics box takes the whole screen.
+/// and the process box the rest, after a blank row when it still has `PROC_MIN_ROWS` process rows
+/// then; left with fewer than `PROC_MIN_ROWS` process rows, the process list is auto-hidden.
+/// Without it, the metrics box takes the whole screen.
 pub(super) fn compute_layout(area: Rect, procs: bool) -> LayoutPlan {
   let mut plan = LayoutPlan::default();
   if area.is_empty() {
@@ -88,15 +95,20 @@ pub(super) fn compute_layout(area: Rect, procs: bool) -> LayoutPlan {
   let mut top = area;
   if procs && procs_fit(area) {
     top.height = metrics_height(area.height);
-    plan.proc = Some(Rect { y: top.bottom(), height: area.height - top.height, ..area });
+    let rest = area.height - top.height;
+    let gap = u16::from(rest > PROC_MIN_ROWS + PROC_CHROME);
+    plan.proc = Some(Rect { y: top.bottom() + gap, height: rest - gap, ..area });
   }
   plan.top = Some(top);
 
+  // a blank row under each row of boxes when both keep their graph rows
   let inner = top.inner(Margin::new(1, 1));
-  let upper = inner.height.div_ceil(2);
+  let gap = u16::from(inner.height >= 2 * (SPACED_GRAPH_ROWS + 2) + 2);
+  let boxes = inner.height - 2 * gap;
+  let upper = boxes.div_ceil(2);
   let rows = [
     (Rect { height: upper, ..inner }, TOP_ROW),
-    (Rect { y: inner.y + upper, height: inner.height - upper, ..inner }, BOTTOM_ROW),
+    (Rect { y: inner.y + upper + gap, height: boxes - upper, ..inner }, BOTTOM_ROW),
   ];
   for (row, metrics) in rows {
     if row.is_empty() {
@@ -122,8 +134,12 @@ mod tests {
       let plan = compute_layout(Rect::new(0, 0, width, height), true);
       let ctx = format!("{width}x{height}");
       assert_eq!(plan.top, Some(Rect::new(0, 0, width, top)), "{ctx}");
-      assert_eq!(plan.proc, Some(Rect::new(0, top, width, height - top)), "{ctx}");
+      // after a blank row
+      assert_eq!(plan.proc, Some(Rect::new(0, top + 1, width, height - top - 1)), "{ctx}");
     }
+    // 100x14: no room for the blank row, the process list right under the metrics box
+    let plan = compute_layout(Rect::new(0, 0, 100, 14), true);
+    assert_eq!(plan.proc, Some(Rect::new(0, 8, 100, 6)));
   }
 
   #[test]
@@ -131,8 +147,17 @@ mod tests {
     let area = Rect::new(0, 0, 120, 40);
     let plan = compute_layout(area, false);
     assert_eq!((plan.top, plan.proc), (Some(area), None));
-    // 38 rows inside: 19 for each row of boxes
-    assert!(plan.boxes.iter().all(|(_, r)| r.height == 19), "{plan:?}");
+    // 38 rows inside: a blank row under each row of boxes, 18 rows for each
+    let rows: Vec<(u16, u16)> = plan.boxes.iter().map(|(_, r)| (r.y, r.height)).collect();
+    assert_eq!(rows, [(1, 18), (1, 18), (1, 18), (20, 18), (20, 18), (20, 18)]);
+
+    // rows of boxes 4 high (2 graph rows) with the blank rows, from 10 rows inside; with 9, none
+    let rows = |height| {
+      let plan = compute_layout(Rect::new(0, 0, 120, height), false);
+      plan.boxes.iter().map(|(_, r)| (r.y, r.height)).step_by(3).collect::<Vec<_>>()
+    };
+    assert_eq!(rows(12), [(1, 4), (6, 4)]);
+    assert_eq!(rows(11), [(1, 5), (6, 4)]);
 
     // 100x13: an 8 rows metrics box would leave 5 rows, one short of the smallest process box
     let small = Rect::new(0, 0, 100, 13);
@@ -151,13 +176,15 @@ mod tests {
         let plan = compute_layout(area, procs);
         let ctx = format!("{area:?} procs={procs}");
 
-        // the metrics box on top, the process box right under it to the bottom
+        // the metrics box on top, the process box under it (after a blank row at most) to the
+        // bottom
         let top = plan.top.expect("metrics box");
         assert_eq!(plan.proc.is_some(), procs && procs_fit(area), "{ctx}");
         match plan.proc {
           Some(proc) => {
-            let rest = Rect { y: top.bottom(), height: area.bottom() - top.bottom(), ..area };
-            assert_eq!(proc, rest, "{ctx}");
+            let gap = proc.y - top.bottom();
+            assert!(gap <= 1 && proc.bottom() == area.bottom(), "{ctx}: {proc:?}");
+            assert_eq!((proc.x, proc.width), (area.x, area.width), "{ctx}");
             assert!(proc.height >= PROC_MIN_ROWS + PROC_CHROME, "{ctx}");
           }
           None => assert_eq!(top, area, "{ctx}: metrics take the full height"),
