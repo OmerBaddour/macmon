@@ -1,19 +1,35 @@
-# `macmon` – Mac Monitor
+# `macmon` – Mac Monitor (personal fork)
 
-<div align="center">
+A personal fork of [vladkens/macmon](https://github.com/vladkens/macmon), the sudoless performance monitor for Apple Silicon Macs by [vladkens](https://github.com/vladkens). All the hard parts (reading CPU / GPU / ANE power, temperatures and memory through private macOS APIs, the same data `powermetrics` exposes, without root) are theirs; go there for the released tool.
 
-[<img src="https://badges.ws/github/assets-dl/vladkens/macmon" />](https://github.com/vladkens/macmon/releases)
-[<img src="https://badges.ws/github/release/vladkens/macmon" />](https://github.com/vladkens/macmon/releases)
-[<img src="https://badges.ws/github/license/vladkens/macmon" />](https://github.com/vladkens/macmon/blob/main/LICENSE)
-[<img src="https://badges.ws/badge/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
+The fork reworks the terminal UI around running local LLMs next to normal work, where the question is whether memory is under pressure and what is using it:
 
-</div>
+- **Process list on its own interval** (`-I`, `[` / `]`), so it can refresh slower than the graphs.
+- **Memory pressure**, not just “used”: RAM split into wired / app / compressed / cached as Activity Monitor splits it, the history colored by kernel memory pressure, swap activity on the title.
+- **Network** download / upload in place of the mostly idle ANE power box, and per process in the process list.
+- **Disk** read / write throughput.
+- A reworked layout that gives the metric boxes half the screen and degrades gracefully in small windows.
 
-`macmon` is a sudoless performance monitor for Apple Silicon Macs. It reads real-time CPU / GPU / ANE power usage, temperatures, and memory stats through a private macOS API — the same data `powermetrics` exposes — without requiring root access.
-
-<div align="center">
-  <img src="https://github.com/vladkens/macmon/blob/assets/macmon-v0.9.png?raw=true" alt="preview" />
-</div>
+```
+╭─ Apple M5 Pro (12P+6S+20GPU 64GB) ─────────────────────────────────────────────────────────────────── macmon v0.9.0 ─╮
+│╭─ CPU 2% ──────────────────╮╭─ GPU 2% @ 338 MHz ─────────╮╭─ RAM 25.87 GB (40.4%) · SWAP 2.78 / 4.0 GB ──── normal ─╮│
+││                           ││                            ││██████████████████████████████████████                   ││
+││                           ││                            ││                                                         ││
+││                           ││                            ││                                                         ││
+││                           ││                            ││                                             ▅▅▅▅▅▅▅▅▅▅▅▅││
+││               ▁▁▂▁▁▁▁▂▂▁▁▁││                ▂▁▁▁▁▁▁▁▁▁▁▁││                                             ████████████││
+│╰─ S 2% · P 2% ─────────────╯╰────────────────────────────╯╰─ wired 4.0 · app 20.2 · comp 1.7 ×4.3 · cache 17.3 GB ──╯│
+│                                                                                                                      │
+│╭─ CPU 0.66W ──────── 39°C ─╮╭─ GPU 0.05W ───────── 39°C ─╮╭─ DISK R 0 B/s W 0 B/s ────╮╭─ NET ↓ 341 B/s ↑ 310 B/s ──╮│
+││               █ █    ▄    ││                █           ││                           ││                            ││
+││               █ █ ▇  █▁ ▄▄││                █  ▃ ▂▁▂    ││                           ││                            ││
+││               █ █▇██▃██▅██││                █▆▆█▄████▇▃▇││                    ▁      ││                 ▁▁▁▁▁▁▁▁▁▁▁││
+││               █▅██████████││                ████████████││                       █   ││                            ││
+││               ████████████││                ████████████││                 ▁▁▁▁▁▁█   ││                 ▁▁▁▁▁▁▁▁▁▁▁││
+│╰───────────────────────────╯╰────────────────────────────╯╰─ R8.1K W9.6M ─────────────╯╰─ ↓5.7K ↑39.3K ─────────────╯│
+│                                                                                                                      │
+╰─ Power 0.71W (0.71, 1.04) | Fans 0/0 RPM | Total 13.33W (13.96, 16.30) ──────────────────────────────────────────────╯
+```
 
 ## 🌟 Features
 
@@ -32,34 +48,15 @@
 
 ## 📥 Installation
 
-Install [`macmon`](https://formulae.brew.sh/formula/macmon) using [brew](https://brew.sh/):
+Build from source with a [Rust toolchain](https://rustup.rs/):
 
 ```sh
-brew install macmon
+git clone https://github.com/OmerBaddour/macmon.git
+cd macmon
+cargo install --path .
 ```
 
-<details>
-<summary>Other installation methods</summary>
-
-Install using [MacPorts](https://ports.macports.org/port/macmon/):
-
-```sh
-sudo port install macmon
-```
-
-Install using [Cargo](https://crates.io/crates/macmon):
-
-```sh
-cargo install macmon
-```
-
-Install using [Nix](https://search.nixos.org/packages?show=macmon&from=0&size=50&type=packages&query=macmon):
-
-```sh
-nix-env -i macmon
-```
-
-</details>
+This puts `macmon` in `~/.cargo/bin`. To try it without installing, run `cargo run --release`.
 
 ## 🚀 Usage
 
@@ -67,16 +64,18 @@ nix-env -i macmon
 Usage: macmon [OPTIONS] [COMMAND]
 
 Commands:
-  pipe    Output metrics in JSON format
-  serve   Serve metrics over HTTP
-  debug   Print debug information
-  stress  Generate load for testing metrics
-  help    Print this message or the help of the given subcommand(s)
+  pipe       Output metrics in JSON format (suitable for piping)
+  serve      Serve metrics over HTTP (JSON at /json, Prometheus at /metrics)
+  debug      Print debug information
+  find-clpc  Find CLPC power counters with CPU/GPU/ANE loads
+  stress     Generate load for testing metrics
+  help       Print this message or the help of the given subcommand(s)
 
 Options:
-  -i, --interval <INTERVAL>  Update interval in milliseconds [default: 1000]
-  -h, --help                 Print help
-  -V, --version              Print version
+  -i, --interval <INTERVAL>            Update interval in milliseconds [default: 1000]
+  -I, --proc-interval <PROC_INTERVAL>  Process list refresh interval in milliseconds, independent from `--interval` [default: 5000]
+  -h, --help                           Print help
+  -V, --version                        Print version
 ```
 
 ### Interactive mode
@@ -377,7 +376,7 @@ Creating `Sampler` inside the worker keeps its low-level macOS handles on that t
 
 ## 🤝 Contributing
 
-All contributions are welcome! Feel free to open an issue or submit a pull request.
+This fork is personal. Issues and improvements for macmon itself belong [upstream](https://github.com/vladkens/macmon).
 
 ## 📝 License
 
