@@ -23,7 +23,6 @@ const HELP: &[Row] = &[
   Section("Keys"),
   Key("q", "quit"),
   Key("p", "show / hide the processes"),
-  Key("v", "graph / gauge"),
   Key("r", "CPU and GPU usage: scaled / active"),
   Key("- / +", "update interval"),
   Key("[ / ]", "process list interval"),
