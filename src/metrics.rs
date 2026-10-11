@@ -141,7 +141,7 @@ pub struct MemMetrics {
 
 /// Network throughput over all interfaces but loopback, tunnels and bridges, which would count
 /// the same traffic twice (see [`crate::sources::NetInterface::counted`]).
-#[derive(Debug, Default, Clone, Copy, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct NetMetrics {
   /// Bytes received over the sampling interval, per second.
   pub rx_rate: u64,

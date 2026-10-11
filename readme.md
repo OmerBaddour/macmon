@@ -24,7 +24,7 @@
 - 🌐 Network download / upload throughput
 - 📈 Historical charts with average and max values
 - 🌡️ Average CPU / GPU temperature
-- 📋 Process list with per-process CPU, memory, power and GPU usage
+- 📋 Process list with per-process CPU, memory, power, GPU usage and network download / upload
 - 🎨 Follows your terminal's color scheme
 - 🪟 Can be displayed in a small window
 - 🦀 Written in Rust

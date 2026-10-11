@@ -38,6 +38,7 @@ const HELP: &[Row] = &[
   Key("CPU box", "the whole CPU; its clusters below, fastest first"),
   Key("scaled", "usage weighted by frequency; active: share of time busy"),
   Key("POWER -", "not available for other users' processes"),
+  Key("DOWN / UP", "network per second (46.8M = 46.8 MB/s); no loopback"),
   Key("RAM bar", "wired / app / compressed / cached; free blank"),
   Key("RAM graph", "colored by memory pressure, as Activity Monitor"),
   Key("SWAP ⇅", "swapping now: yellow, red from 10 MB/s"),
