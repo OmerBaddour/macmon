@@ -71,6 +71,11 @@ pub struct Config {
   #[serde_inline_default(1000)]
   interval: u32,
 
+  /// Saved process list interval in milliseconds, independent from `interval`; `proc_interval()`
+  /// is the one in use.
+  #[serde_inline_default(3000)]
+  proc_interval: u32,
+
   #[serde_inline_default(RatioMode::Scaled)]
   pub ratio_mode: RatioMode,
 
@@ -88,6 +93,11 @@ pub struct Config {
   /// replace both.
   #[serde(skip)]
   run_interval: Option<u32>,
+
+  /// Process list interval from `-I` for this run only: used instead of the saved one, never
+  /// saved. Shift-`-` / Shift-`+` replace both.
+  #[serde(skip)]
+  run_proc_interval: Option<u32>,
 
   /// File the settings are saved to on every change; `None` keeps them in memory only.
   #[serde(skip)]
@@ -123,6 +133,7 @@ fn give_to(path: &Path, owner: Option<(u32, u32)>) {
 impl Config {
   fn normalize(mut self) -> Self {
     self.interval = self.interval.clamp(TUI_MIN_MS, TUI_MAX_MS);
+    self.proc_interval = self.proc_interval.clamp(TUI_MIN_MS, TUI_MAX_MS);
     self
   }
 
@@ -207,6 +218,36 @@ impl Config {
   pub fn inc_interval(&mut self) {
     let step = 250;
     self.set_interval((self.interval().saturating_add(step) / step * step).min(TUI_MAX_MS));
+  }
+
+  /// Process list interval in use: the one from `-I`, else the saved one.
+  pub fn proc_interval(&self) -> u32 {
+    self.run_proc_interval.unwrap_or(self.proc_interval)
+  }
+
+  /// Uses `msec` (clamped) for this run without saving it, as `-I` does.
+  pub fn set_run_proc_interval(&mut self, msec: u32) {
+    self.run_proc_interval = Some(msec.clamp(TUI_MIN_MS, TUI_MAX_MS));
+  }
+
+  /// Sets and saves the process list interval, which replaces one from `-I`.
+  fn set_proc_interval(&mut self, msec: u32) {
+    self.proc_interval = msec;
+    self.run_proc_interval = None;
+    self.save();
+  }
+
+  pub fn dec_proc_interval(&mut self) {
+    let step = 500;
+    self.set_proc_interval(
+      (self.proc_interval().saturating_sub(step).div_ceil(step) * step).max(TUI_MIN_MS),
+    );
+  }
+
+  pub fn inc_proc_interval(&mut self) {
+    let step = 500;
+    self
+      .set_proc_interval((self.proc_interval().saturating_add(step) / step * step).min(TUI_MAX_MS));
   }
 
   pub fn toggle_view_type(&mut self) {
@@ -380,5 +421,41 @@ mod tests {
     // `-` / `+` step from the interval in use and save it
     cfg.dec_interval();
     assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (250.into(), 250));
+  }
+
+  #[test]
+  fn proc_interval_steps_and_saves_independently_from_the_interval() {
+    let file = TempConfig::new("proc_interval_steps_and_saves");
+    let mut cfg = Config::load_from(Some(file.path()));
+    assert_eq!((cfg.interval(), cfg.proc_interval()), (1000, 3000));
+
+    // Shift-`-` / Shift-`+` step the process list interval by 500 ms and never touch `interval`
+    cfg.dec_proc_interval();
+    assert_eq!((file.saved()["proc_interval"].clone(), cfg.proc_interval()), (2500.into(), 2500));
+    assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (1000.into(), 1000));
+    cfg.inc_proc_interval();
+    cfg.inc_proc_interval();
+    assert_eq!(cfg.proc_interval(), 3500);
+
+    // clamped like the other intervals, including a saved value out of range
+    for _ in 0..8 {
+      cfg.dec_proc_interval();
+    }
+    assert_eq!(cfg.proc_interval(), 250);
+    assert_eq!(parse(r#"{"proc_interval": 100000}"#).proc_interval(), 10_000);
+
+    // `-I 500`: used for this run, clamped like a saved value
+    cfg.set_run_proc_interval(10);
+    assert_eq!(cfg.proc_interval(), TUI_MIN_MS);
+    cfg.set_run_proc_interval(500);
+
+    // other settings save the interval of the file, not the one from `-I`
+    cfg.toggle_ratio_mode();
+    assert_eq!((file.saved()["proc_interval"].clone(), cfg.proc_interval()), (250.into(), 500));
+    assert_eq!(Config::load_from(Some(file.path())).proc_interval(), 250);
+
+    // Shift-`-` / Shift-`+` step from the interval in use and save it
+    cfg.dec_proc_interval();
+    assert_eq!((file.saved()["proc_interval"].clone(), cfg.proc_interval()), (250.into(), 250));
   }
 }

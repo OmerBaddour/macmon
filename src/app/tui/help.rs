@@ -26,6 +26,7 @@ const HELP: &[Row] = &[
   Key("v", "graph / gauge"),
   Key("r", "CPU and GPU usage: scaled / active"),
   Key("- / +", "update interval"),
+  Key("Shift - / +", "process list interval"),
   Key("/", "filter the processes"),
   Key("s / S", "sort by the next column / reverse"),
   Key("↑ ↓", "select a process"),
