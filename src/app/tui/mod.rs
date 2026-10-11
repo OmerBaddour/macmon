@@ -25,7 +25,8 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::{ExecutableCommand, cursor, terminal};
 use ratatui::prelude::*;
 use store::{
-  CpuClusters, FanStore, FreqSample, FreqStore, MemoryStore, NetStore, PowerStore, TempStore,
+  CpuClusters, FanStore, FreqSample, FreqStore, LoadStore, MemoryStore, NetStore, PowerStore,
+  TempStore,
 };
 
 use crate::config::{Config, TUI_MIN_MS};
@@ -290,6 +291,8 @@ pub struct App {
   gpu_temp: TempStore,
   fans: FanStore,
 
+  /// Whole CPU, the clusters weighted by core count.
+  cpu: LoadStore,
   /// CPU clusters, lowest tier first (E / P on M1–M4, P / S on M5+).
   clusters: CpuClusters,
   igpu_freq: FreqStore,
@@ -325,6 +328,7 @@ impl App {
     self.all_power.push(data.all_power as f64);
     self.sys_power.push(data.sys_power as f64);
 
+    self.cpu.push(data.cpu_scaled_ratio as f64, data.cpu_active_ratio as f64);
     self.clusters.push(&store::cluster_samples(&data));
     let igpu = FreqSample::new(data.gpu_freq_mhz, data.gpu_scaled_ratio, data.gpu_active_ratio);
     self.igpu_freq.push(igpu);
@@ -459,7 +463,7 @@ impl App {
 
   /// Screen layout for the current settings and metrics.
   fn layout(&self, area: Rect) -> LayoutPlan {
-    compute_layout(area, self.cfg.show_procs, self.clusters.items.len())
+    compute_layout(area, self.cfg.show_procs)
   }
 
   /// Layout of a frame for the window `area`, with the state that follows the window updated
@@ -597,6 +601,8 @@ mod tests {
       gpu_freq_mhz: 1400,
       gpu_scaled_ratio: 0.23,
       gpu_active_ratio: 0.3,
+      cpu_scaled_ratio: 0.6,
+      cpu_active_ratio: 0.65,
       cpu_power: 4.5,
       gpu_power: 2.0,
       ane_power: 0.1,
@@ -645,9 +651,9 @@ mod tests {
     (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
   }
 
-  /// Screen row where the process box starts in a 200x50 window: right under the metrics box, 40 %
+  /// Screen row where the process box starts in a 200x50 window: right under the metrics box, half
   /// of the height.
-  const PROC_Y: u16 = 20;
+  const PROC_Y: u16 = 25;
 
   /// Text of row `y` of the process box in a 200x50 window: 0 is the title, 1 the header.
   fn proc_row(buf: &Buffer, y: u16) -> String {
@@ -781,10 +787,12 @@ mod tests {
     let file = TempConfig::new("setting_keys_change_and_save_the_config");
     let mut app = saving_app(&file);
 
-    // r: active ratios, E-CPU 50 % instead of 42 %
+    // r: active ratios, CPU 65 % instead of 60 %, its clusters too
     assert!(app.handle_key(key('r')).is_continue());
     assert_eq!(file.saved()["ratio_mode"], "Active");
-    assert!(render_to_string(&mut app, 200, 50).contains("╭─ E-CPU 50% @ 1800 MHz ─"));
+    let screen = render_to_string(&mut app, 200, 50);
+    assert!(screen.contains("╭─ CPU 65% ─"), "{screen}");
+    assert!(screen.contains("╰─ P 80% 3.2 GHz · E 50% 1.8 GHz ─"), "{screen}");
 
     // -/+ step the interval by 250 ms; `=` is `+` without shift
     for (c, interval) in [('+', 1250), ('=', 1500), ('-', 1250)] {
@@ -806,7 +814,8 @@ mod tests {
     assert_eq!(file.saved()["view_type"], "Gauge");
     let buf = render_buffer(&mut app, 200, 50);
     let gauge = app.layout(buf.area).boxes[0].1.inner(Margin::new(1, 1));
-    let filled = (f64::from(gauge.width) * 0.5).round() as usize;
+    // the CPU box: 65 % active
+    let filled = (f64::from(gauge.width) * 0.65).round() as usize;
     let line = format!("{}{}", "█".repeat(filled), " ".repeat(usize::from(gauge.width) - filled));
     for y in gauge.top()..gauge.bottom() {
       let cells: String = (gauge.left()..gauge.right()).map(|x| buf[(x, y)].symbol()).collect();
@@ -1056,7 +1065,7 @@ mod tests {
   #[test]
   fn renders_every_box_at_any_size() {
     use Metric::*;
-    let every_box = [Cluster(0), Cluster(1), Gpu, Ram, CpuPower, GpuPower, Network];
+    let every_box = [Cpu, Gpu, Ram, CpuPower, GpuPower, Network];
     let sizes = [
       (400, 120),
       (200, 50),
@@ -1103,9 +1112,8 @@ mod tests {
 
   /// Full box titles of `test_metrics`: the original format without the RAM total and without
   /// alignment padding.
-  const TITLES: [&str; 7] = [
-    "E-CPU 42% @ 1800 MHz",
-    "P-CPU 77% @ 3200 MHz",
+  const TITLES: [&str; 6] = [
+    "CPU 60%",
     "GPU 23% @ 1400 MHz",
     "RAM 20.00 GB (55.6%) · SWAP 1.00 / 2.0 GB",
     "CPU 4.50W (4.50, 4.50)",
@@ -1152,6 +1160,22 @@ mod tests {
     let bottom: String =
       (area.left()..area.right()).map(|x| buf[(x, area.bottom() - 1)].symbol()).collect();
     assert!(bottom.starts_with("╰─ peak ↓ 4.0 MB/s ↑ 1.0 MB/s ─"), "{bottom}");
+  }
+
+  #[test]
+  fn cpu_box_lists_its_clusters_fastest_first_as_long_as_they_fit() {
+    let mut app = test_app();
+    // (window width, bottom border of the CPU box)
+    let cases =
+      [(200, "╰─ P 77% 3.2 GHz · E 42% 1.8 GHz ─"), (80, "╰─ P 77% · E 42% ─"), (50, "╰──")];
+    for (width, bottom) in cases {
+      let buf = render_buffer(&mut app, width, 50);
+      let area = box_area(&app, &buf, Metric::Cpu);
+      let line: String =
+        (area.left()..area.right()).map(|x| buf[(x, area.bottom() - 1)].symbol()).collect();
+      assert!(line.starts_with(bottom), "{width}: {line}");
+      assert!(!line.contains('…'), "{width}: {line}");
+    }
   }
 
   #[test]
@@ -1207,8 +1231,8 @@ mod tests {
     for (has_swap, cases) in [(true, &swap[..]), (false, &no_swap[..])] {
       let mut app = ram_app(has_swap);
       for &(width, title) in cases {
-        // the clusters, GPU and RAM boxes `width` cells each, side by side
-        let buf = render_buffer(&mut app, width * 4 + 2, 50);
+        // the CPU, GPU and RAM boxes `width` cells each, side by side
+        let buf = render_buffer(&mut app, width * 3 + 2, 50);
         let title = if title.is_empty() { String::new() } else { format!("─ {title} ") };
         let dashes = "─".repeat(usize::from(width) - 2 - title.chars().count());
         let top = box_top(&app, &buf, Metric::Ram);
@@ -1248,8 +1272,9 @@ mod tests {
   fn ram_box_shows_the_kinds_of_ram_and_the_pressure() {
     use ratatui::style::Color;
 
+    // a RAM box 50 cells wide
     let mut app = pressured_app(Some(MemPressure::Warning));
-    let buf = render_buffer(&mut app, 200, 50);
+    let buf = render_buffer(&mut app, 152, 50);
     let area = box_area(&app, &buf, Metric::Ram);
     let line =
       |y: u16| -> String { (area.left()..area.right()).map(|x| buf[(x, y)].symbol()).collect() };
@@ -1292,7 +1317,7 @@ mod tests {
         memory: MemMetrics { swap_in_rate: 0, swap_out_rate: rate, ..pressured.mem.last },
         ..test_metrics()
       });
-      let buf = render_buffer(&mut app, 200, 50);
+      let buf = render_buffer(&mut app, 152, 50);
       let top: String = (area.left()..area.right()).map(|x| buf[(x, area.y)].symbol()).collect();
       assert!(top.contains(&format!("· {title} ─")), "{top}");
       let x = area.left() + x_of(&top, "91%");
@@ -1301,7 +1326,7 @@ mod tests {
 
     // `v`: the bar over the whole box
     app.cfg.view_type = crate::config::ViewType::Gauge;
-    let buf = render_buffer(&mut app, 200, 50);
+    let buf = render_buffer(&mut app, 152, 50);
     for y in area.y + 1..area.bottom() - 1 {
       let cells: String = inner.clone().map(|x| buf[(x, y)].symbol()).collect();
       assert_eq!(cells.matches('█').count(), 45, "row {y}");
