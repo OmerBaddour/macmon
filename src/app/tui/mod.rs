@@ -650,9 +650,9 @@ mod tests {
     (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
   }
 
-  /// Screen row where the process box starts in a 200x50 window: right under the metrics box, half
-  /// of the height.
-  const PROC_Y: u16 = 25;
+  /// Screen row where the process box starts in a 200x50 window: after the metrics box (half of the
+  /// height) and a blank row.
+  const PROC_Y: u16 = 26;
 
   /// Text of row `y` of the process box in a 200x50 window: 0 is the title, 1 the header.
   fn proc_row(buf: &Buffer, y: u16) -> String {
@@ -1182,7 +1182,9 @@ mod tests {
     assert!(box_top(&app, &buf, Metric::Network).ends_with("───╮"));
     // the power summary on the bottom border of the metrics box
     let summary = "╰─ Power 6.60W (6.60, 6.60) | Fan 1200 RPM | Total 12.00W (12.00, 12.00) ─";
-    assert!(row(&buf, PROC_Y - 1).starts_with(summary), "{}", row(&buf, PROC_Y - 1));
+    assert!(row(&buf, PROC_Y - 2).starts_with(summary), "{}", row(&buf, PROC_Y - 2));
+    // a blank row before the process list
+    assert_eq!(row(&buf, PROC_Y - 1).trim(), "");
   }
 
   #[test]
