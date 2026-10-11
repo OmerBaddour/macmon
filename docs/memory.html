@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reading macOS Memory</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,750&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column; each kind of memory is a row keyed by its bar color, examples are macmon-style terminal boxes.
+   Single dark look by choice: every color is the ANSI color macmon draws (theme.rs), as Ghostty's Desert theme renders it. */
+:root {
+  --bg: #2b2b2b;          /* page, a step below the terminal */
+  --surface: #333333;     /* Desert background */
+  --fg: #f5deb3;          /* ANSI 7 white */
+  --muted: #b3a891;
+  --rule: #4d4d4d;        /* ANSI 0 black */
+  --term-bg: #333333;     /* Desert background */
+  --term-fg: #ffffff;     /* Desert foreground: macmon's text color */
+  --term-dim: #626262;    /* ANSI 8 bright black: macmon's borders and dim text */
+  --wired: #ffdead;       /* ANSI 5 magenta: RAM_WIRED */
+  --app: #cd853f;         /* ANSI 4 blue: RAM_APP */
+  --comp: #ffa0a0;        /* ANSI 6 cyan: RAM_COMPRESSED */
+  --cache: #626262;       /* ANSI 8 bright black: RAM_CACHED */
+  --ok: #98fb98;          /* ANSI 2 green: pressure normal */
+  --warn: #f0e68c;        /* ANSI 3 yellow: pressure warning, SWAP⇅ */
+  --crit: #ff2b2b;        /* ANSI 1 red: pressure critical, SWAP⇅ from 10 MB/s */
+  --display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --body: "IBM Plex Sans", -apple-system, "Helvetica Neue", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: dark;
+}
+
+body { background: var(--bg); color: var(--fg); font: 16px/1.6 var(--body); }
+.wrap { max-width: 46rem; margin: 0 auto; padding-inline: 20px; padding-block: 48px 72px; display: grid; gap: 56px; }
+h1, h2 { font-family: var(--display); text-wrap: balance; letter-spacing: -0.01em; margin: 0; }
+h1 { font-size: clamp(2rem, 6vw, 2.9rem); line-height: 1.08; font-weight: 750; }
+h2 { font-size: 1.45rem; font-weight: 600; }
+p { margin: 0; }
+.lede { color: var(--muted); font-size: 1.08rem; max-width: 38rem; }
+section { display: grid; gap: 18px; }
+.eyebrow { font: 500 0.75rem/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+code, .mono { font-family: var(--mono); font-size: 0.9em; }
+header { display: grid; gap: 16px; }
+
+/* the bar, as macmon draws it */
+.bar { display: flex; height: 22px; border-radius: 3px; overflow: hidden; background: transparent; outline: 1px solid var(--rule); }
+.bar span { display: block; height: 100%; }
+.w { background: var(--wired); } .a { background: var(--app); } .c { background: var(--comp); } .k { background: var(--cache); }
+.scale { display: flex; justify-content: space-between; font: 0.75rem var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* kinds */
+.kinds { display: grid; gap: 0; border-top: 1px solid var(--rule); }
+.kind { display: grid; grid-template-columns: 8.5rem 1fr; gap: 6px 20px; padding-block: 22px; border-bottom: 1px solid var(--rule); }
+.kind > div { min-width: 0; display: grid; gap: 8px; }
+.name { display: flex; align-items: baseline; gap: 10px; font: 600 1.05rem var(--body); }
+.swatch { width: 12px; height: 12px; border-radius: 2px; flex: none; transform: translateY(1px); }
+.swatch.free { outline: 1px dashed var(--muted); outline-offset: -1px; }
+.am { font: 0.78rem var(--mono); color: var(--muted); }
+.reclaim { font: 500 0.78rem var(--mono); }
+.reclaim b { font-weight: 500; padding: 1px 7px; border-radius: 99px; border: 1px solid currentColor; }
+.r-yes { color: var(--ok); } .r-cost { color: var(--warn); } .r-no { color: var(--crit); }
+.ex { color: var(--muted); font-size: 0.95rem; }
+.ex strong { color: var(--fg); font-weight: 500; }
+
+/* terminal boxes */
+.examples { display: grid; gap: 28px; }
+.case { display: grid; gap: 12px; }
+.case h3 { margin: 0; font: 600 1.05rem var(--body); }
+.case .src { font: 0.75rem var(--mono); color: var(--muted); }
+.term { background: var(--term-bg); color: var(--term-fg); border-radius: 8px; padding: 14px 16px; font: 0.82rem/1.5 var(--mono); overflow-x: auto; }
+.tbox { border: 1px solid var(--term-dim); border-radius: 6px; padding: 8px 10px 6px; position: relative; min-width: 22rem; display: grid; gap: 8px; }
+.ttitle, .tfoot { display: flex; justify-content: space-between; gap: 12px; white-space: nowrap; }
+.ttitle b { font-weight: 500; }
+.tfoot { color: var(--term-fg); }
+.term .bar { outline-color: var(--term-dim); border-radius: 0; height: 16px; }
+.lg { display: inline-flex; gap: 10px; flex-wrap: nowrap; }
+.lg i { font-style: normal; }
+.dim { color: var(--term-dim); }
+.okc { color: var(--ok); } .warnc { color: var(--warn); } .critc { color: var(--crit); }
+.cw { color: var(--wired); } .ca { color: var(--app); } .cc { color: var(--comp); } .ck { color: var(--cache); }
+.verdict { font-size: 0.95rem; }
+.verdict b { font-weight: 600; }
+
+/* signals */
+.signals { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 16px; }
+.signal { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; }
+.signal h3 { margin: 0; font: 600 1rem var(--body); }
+.signal p { font-size: 0.93rem; color: var(--muted); }
+.pills { display: flex; gap: 8px; flex-wrap: wrap; font: 500 0.78rem var(--mono); }
+.pills span { padding: 2px 8px; border-radius: 99px; border: 1px solid currentColor; }
+
+/* table */
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.93rem; min-width: 32rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font: 500 0.75rem var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+td:first-child { white-space: nowrap; }
+
+ol.rules { margin: 0; padding-left: 1.3rem; display: grid; gap: 10px; }
+ol.rules li::marker { font-family: var(--mono); color: var(--muted); }
+
+@media (max-width: 560px) {
+  .kind { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <span class="eyebrow">macmon · RAM box</span>
+    <h1>Reading macOS memory</h1>
+    <p class="lede">macmon splits RAM the way Activity Monitor does. The colored bar spans your Mac's total physical RAM, so the whole width is 64&nbsp;GB on a 64&nbsp;GB machine. What matters is not how full the bar is, but which colors fill it.</p>
+    <p class="ex">macmon draws with your terminal's ANSI colors, so the shades follow its theme. This page uses Ghostty's Desert theme: magenta, blue and cyan come out as wheat, tan and pink there.</p>
+    <div>
+      <div class="bar" aria-label="Example bar: wired 4 GB, app 13 GB, compressed 2.4 GB, cached 6.8 GB of 64 GB">
+        <span class="w" style="width:6.2%"></span><span class="a" style="width:20.3%"></span><span class="c" style="width:3.8%"></span><span class="k" style="width:10.6%"></span>
+      </div>
+      <div class="scale" style="margin-top:6px"><span>0</span><span>16</span><span>32</span><span>48</span><span>64 GB</span></div>
+    </div>
+  </header>
+
+  <section>
+    <span class="eyebrow">The five kinds, left to right</span>
+    <h2>What each color holds</h2>
+    <div class="kinds">
+
+      <div class="kind">
+        <div class="name"><span class="swatch w"></span>wired</div>
+        <div>
+          <span class="am">Activity Monitor: Wired Memory</span>
+          <p>Memory pinned in place. The kernel and drivers need it to stay exactly where it is, so macOS can never compress it or move it to disk.</p>
+          <span class="reclaim r-no"><b>never reclaimed</b> until its owner lets go</span>
+          <p class="ex"><strong>Examples:</strong> the kernel itself; GPU buffers, including a local LLM's weights and context cache. A 30&nbsp;GB Ollama model shows up here, not under the <code>ollama</code> process's app memory.</p>
+        </div>
+      </div>
+
+      <div class="kind">
+        <div class="name"><span class="swatch a"></span>app</div>
+        <div>
+          <span class="am">Activity Monitor: App Memory</span>
+          <p>Data programs created while running, with no file behind it on disk. If macOS needs the room, it has to compress this memory or write it to swap first.</p>
+          <span class="reclaim r-cost"><b>reclaimed at a cost</b> compress, then swap</span>
+          <p class="ex"><strong>Examples:</strong> browser tabs, an editor's open buffers, a compiler's working state, Spotify's decoded audio.</p>
+        </div>
+      </div>
+
+      <div class="kind">
+        <div class="name"><span class="swatch c"></span>comp</div>
+        <div>
+          <span class="am">Activity Monitor: Compressed</span>
+          <p>App memory that hasn't been used lately, squeezed in place instead of written to disk. The bar shows the RAM the compressor occupies. The legend's <code>×2.1</code> is how much data it holds per GB it uses.</p>
+          <span class="reclaim r-cost"><b>reclaimed at a cost</b> swap out the compressed pages</span>
+          <p class="ex"><strong>Examples:</strong> background tabs you haven't looked at in an hour. Touching them costs a little CPU to decompress, which is far cheaper than reading from disk. A growing cyan section means macOS is working to make room.</p>
+        </div>
+      </div>
+
+      <div class="kind">
+        <div class="name"><span class="swatch k"></span>cache</div>
+        <div>
+          <span class="am">Activity Monitor: Cached Files</span>
+          <p>Copies of files already on disk, kept in RAM in case they're read again, plus memory apps have marked as disposable (purgeable). Dropping it costs nothing, since the original is still on disk.</p>
+          <span class="reclaim r-yes"><b>free in all but name</b> dropped instantly</span>
+          <p class="ex"><strong>Examples:</strong> a project you just built, a video you just watched, model weights Ollama read from disk on load. This is why "used RAM is high" is often harmless.</p>
+        </div>
+      </div>
+
+      <div class="kind">
+        <div class="name"><span class="swatch free"></span>free</div>
+        <div>
+          <span class="am">The blank end of the bar</span>
+          <p>RAM holding nothing yet. macOS fills it with cache whenever it can, so a small free section on a busy Mac is normal and expected.</p>
+          <span class="reclaim r-yes"><b>available now</b></span>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Beyond the bar</span>
+    <h2>Two signals that tell you if it hurts</h2>
+    <div class="signals">
+      <div class="signal">
+        <h3>Memory pressure</h3>
+        <div class="pills"><span class="okc">normal</span><span class="warnc">warning</span><span class="critc">critical</span></div>
+        <p>The kernel's own verdict, the same one Activity Monitor graphs. It accounts for how much is reclaimable and how hard the system is working. macmon shows it on the RAM box's top border and colors the history graph with it, so a full bar with a green graph is fine.</p>
+      </div>
+      <div class="signal">
+        <h3>Swap activity</h3>
+        <div class="pills"><span class="dim" style="color:var(--muted)">SWAP</span><span class="warnc">SWAP⇅</span><span class="critc">SWAP⇅ ≥10 MB/s</span></div>
+        <p>Swap is app memory written to the SSD. How much sits there says little: data stays in swap for hours after the crunch ends. Swapping right now is what makes apps stutter, so macmon colors the SWAP figure only while data is moving.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Examples</span>
+    <h2>Three bars, three verdicts</h2>
+    <div class="examples">
+
+      <div class="case">
+        <h3>A calm afternoon</h3>
+        <span class="src">This Mac, 11 Oct 2026, after Ollama unloaded</span>
+        <div class="term">
+          <div class="tbox">
+            <div class="ttitle"><span><b>RAM</b> 19.12 GB (<span class="okc">29.9%</span>) <span class="dim">·</span> <b>SWAP</b> 3.22 / 4.0 GB</span><span><span class="dim">pressure</span> <span class="okc">normal</span></span></div>
+            <div class="bar"><span class="w" style="width:6.2%"></span><span class="a" style="width:20.0%"></span><span class="c" style="width:3.8%"></span><span class="k" style="width:10.6%"></span></div>
+            <div class="tfoot"><span class="lg"><i><span class="cw">wired</span> 3.9</i><span class="dim">·</span><i><span class="ca">app</span> 12.8</i><span class="dim">·</span><i><span class="cc">comp</span> 2.4 <span class="dim">×3.9</span></i><span class="dim">·</span><i><span class="ck">cache</span> 6.8 <span class="dim">GB</span></i></span></div>
+          </div>
+        </div>
+        <p class="verdict"><b>Fine.</b> Most of the bar is free. 3.2&nbsp;GB still sits in swap from earlier, but the SWAP figure is plain because nothing is moving.</p>
+      </div>
+
+      <div class="case">
+        <h3>A 30 GB model loaded with 128k context</h3>
+        <span class="src">This Mac, 11 Oct 2026, during the long opencode + Qwen session</span>
+        <div class="term">
+          <div class="tbox">
+            <div class="ttitle"><span><b>RAM</b> <span class="critc">91%</span> <span class="dim">·</span> <b>SWAP</b><span class="warnc">⇅</span> <span class="warnc">94%</span></span><span><span class="dim">pressure</span> <span class="warnc">warning</span></span></div>
+            <div class="bar"><span class="w" style="width:59%"></span><span class="a" style="width:10.6%"></span><span class="c" style="width:21.4%"></span><span class="k" style="width:5.6%"></span></div>
+            <div class="tfoot"><span class="lg"><i><span class="cw">■</span>37.8</i><i><span class="ca">■</span>6.8</i><i><span class="cc">■</span>13.7</i><i><span class="ck">■</span>3.6</i></span></div>
+          </div>
+        </div>
+        <p class="verdict"><b>Struggling.</b> The model pinned 38&nbsp;GB as wired, which can't be reclaimed. Everything else is squeezed into the rest: 14&nbsp;GB of compressor holding 30&nbsp;GB of data, almost no cache left, and swap nearly full. Unloading the model, or using a smaller context, is the fix. The memory figures are real readings from that moment. Pressure and swap activity weren't recorded then, so the warning and <code>⇅</code> shown here are an estimate.</p>
+      </div>
+
+      <div class="case">
+        <h3>Full bar, nothing wrong</h3>
+        <span class="src">Illustrative: right after copying a large video library</span>
+        <div class="term">
+          <div class="tbox">
+            <div class="ttitle"><span><b>RAM</b> 17.50 GB (<span class="okc">27.3%</span>) <span class="dim">·</span> <b>SWAP</b> 0.00 / 1.0 GB</span><span><span class="dim">pressure</span> <span class="okc">normal</span></span></div>
+            <div class="bar"><span class="w" style="width:6.3%"></span><span class="a" style="width:19.5%"></span><span class="c" style="width:1.6%"></span><span class="k" style="width:68.8%"></span></div>
+            <div class="tfoot"><span class="lg"><i><span class="cw">wired</span> 4.0</i><span class="dim">·</span><i><span class="ca">app</span> 12.5</i><span class="dim">·</span><i><span class="cc">comp</span> 1.0 <span class="dim">×2.4</span></i><span class="dim">·</span><i><span class="ck">cache</span> 44.0 <span class="dim">GB</span></i></span></div>
+          </div>
+        </div>
+        <p class="verdict"><b>Fine.</b> The bar is 96% filled, but more than two thirds of it is grey cache. The moment an app wants memory, macOS drops cache to make room.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">If you know Linux</span>
+    <h2>Closest equivalents</h2>
+    <p class="ex">These are Activity Monitor's terms. Linux tools like <code>free</code> and <code>/proc/meminfo</code> divide memory differently, so the mapping is approximate.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>macmon</th><th>Linux</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td><span class="cw">■</span> wired</td><td>kernel memory, <code>Unevictable</code> / <code>Mlocked</code></td><td>Linux has no single "wired" figure</td></tr>
+          <tr><td><span class="ca">■</span> app</td><td><code>AnonPages</code></td><td>"anonymous": memory with no file behind it</td></tr>
+          <tr><td><span class="cc">■</span> comp</td><td>zram / zswap</td><td>off on most Linux systems; macOS always compresses</td></tr>
+          <tr><td><span class="ck">■</span> cache</td><td><code>buff/cache</code></td><td>same idea in both: reclaimable file copies</td></tr>
+          <tr><td>free</td><td><code>free</code></td><td>Linux's <code>available</code> ≈ free + reclaimable cache</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">Rules of thumb</span>
+    <h2>Reading it at a glance</h2>
+    <ol class="rules">
+      <li>Look at the graph color before the percentage. Green pressure means memory is fine, however full the bar looks.</li>
+      <li>Grey is free memory waiting to be useful. A bar full of grey is a healthy Mac.</li>
+      <li>A large magenta (wired) section is usually a GPU workload. Local LLMs live here.</li>
+      <li>Growing cyan (compressed) means macOS is making room. It's the early warning before swapping.</li>
+      <li><code>SWAP⇅</code> in yellow or red is the slowdown itself. A big swap total with a plain SWAP figure is old news.</li>
+    </ol>
+  </section>
+</div>
+</body>
+</html>
