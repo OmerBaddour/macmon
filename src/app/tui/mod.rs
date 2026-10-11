@@ -439,7 +439,7 @@ impl App {
   }
 
   /// Whether the mouse is captured: only for the process list on screen, and not under the help,
-  /// so the terminal handles clicks there (its link, text selection).
+  /// so the terminal handles clicks there (text selection).
   fn wants_mouse(&self) -> bool {
     self.procs_visible() && self.help.is_none()
   }
@@ -524,7 +524,6 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-  use std::num::NonZeroU16;
   use std::ops::ControlFlow;
   use std::sync::atomic::AtomicBool;
   use std::sync::{Arc, Mutex, RwLock, mpsc};
@@ -535,7 +534,7 @@ mod tests {
   };
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
-  use ratatui::buffer::{Buffer, CellDiffOption};
+  use ratatui::buffer::Buffer;
   use ratatui::crossterm::ExecutableCommand;
   use ratatui::crossterm::event::{
     EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -892,37 +891,7 @@ mod tests {
   }
 
   #[test]
-  fn help_links_the_support_page_centered_and_only_when_the_line_fits() {
-    let text = "buymeacoffee.com/vladkens";
-    let link = format!("\x1b]8;;https://{text}\x1b\\{text}\x1b]8;;\x1b\\");
-    let mut app = with_procs(test_app(), varied_procs());
-    assert!(app.handle_key(key('?')).is_continue());
-
-    let buf = render_buffer(&mut app, 200, 50);
-    let at = buf.content.iter().position(|cell| cell.symbol() == link).expect("no link");
-    assert_eq!(
-      buf.content[at].diff_option,
-      CellDiffOption::ForcedWidth(NonZeroU16::new(25).unwrap())
-    );
-
-    // centered: as many blank cells on each side up to the box borders, ±1; the line is
-    // "Like macmon? Support it: " (25 cells) before the link (25 cells)
-    let (x, y) = ((at % 200) as u16, (at / 200) as u16);
-    let blank = |x: u16| buf[(x, y)].symbol() == " ";
-    let left = (0..x - 25).rev().take_while(|&x| blank(x)).count();
-    let right = (x + 25..200).take_while(|&x| blank(x)).count();
-    assert!(left.abs_diff(right) <= 1, "{left} blank cells on the left, {right} on the right");
-
-    // still whole in a 60 cells window; cut in a narrower one: plain text, no link
-    let buf = render_buffer(&mut app, 60, 50);
-    assert!(buf.content.iter().any(|cell| cell.symbol() == link));
-    let buf = render_buffer(&mut app, 40, 50);
-    assert!(screen_text(&buf).contains("Like macmon"));
-    assert!(!buf.content.iter().any(|cell| cell.symbol().contains("\x1b]8")));
-  }
-
-  #[test]
-  fn help_releases_the_mouse_for_its_link() {
+  fn help_releases_the_mouse() {
     let mut app = with_procs(test_app(), varied_procs());
     assert!(app.wants_mouse());
     assert!(app.handle_key(key('?')).is_continue());
