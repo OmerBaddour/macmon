@@ -30,8 +30,7 @@ use super::theme::{
   self, NET_RX, NET_TX, RAM_APP, RAM_CACHED, RAM_COMPRESSED, RAM_WIRED, dim, gradient, heading,
   pressure_color, text,
 };
-use super::widgets::{Gauge, Graph, SegmentBar};
-use crate::config::ViewType;
+use super::widgets::{Graph, SegmentBar};
 
 /// Bytes in a GiB, the unit of the RAM box title.
 const GIB: f64 = (1u64 << 30) as f64;
@@ -323,16 +322,15 @@ fn pressure_label(pressure: MemPressure) -> &'static str {
 
 /// How a metric box draws its history.
 enum Scale {
-  /// A load (CPU cluster, GPU, RAM): the graph is scaled to `max` and colored by load, and `v`
-  /// switches it to a gauge of the current `load` (`0.0..=1.0`).
-  Load { max: u64, load: f64 },
+  /// A load (CPU, GPU): the graph is scaled to `max` and colored by load.
+  Load { max: u64 },
   /// Power: the graph is scaled to its largest visible sample, in the low load color, as in the
-  /// original; no gauge.
+  /// original.
   Power,
   /// RAM: the bar of the kinds of RAM on the top row over the history scaled to `max`, each sample
-  /// in its color (the pressure at the time); `v` switches to the bar over the whole box.
+  /// in its color (the pressure at the time); with a single row, the bar alone.
   Ram { max: u64, colors: Vec<Color> },
-  /// Network: download over upload (see `render_net_graphs`); no gauge.
+  /// Network: download over upload (see `render_net_graphs`).
   Net,
 }
 
@@ -353,7 +351,7 @@ impl App {
 
   /// Key hints for the bottom border of the lowest box, keys bold, labels plain: the global keys
   /// in the order of the original UI with the state of the toggles (`q quit | ? help | p procs |
-  /// v graph | r scaled | -/+ 1000ms | [/] 5000ms`; no `p procs` while the window is too small
+  /// r scaled | -/+ 1000ms | [/] 5000ms`; no `p procs` while the window is too small
   /// for the process list), or the filter keys while a filter is typed
   /// (`Enter keep | Esc clear | ↑↓ select`).
   pub(super) fn footer_hints(&self) -> Vec<Vec<Span<'static>>> {
@@ -366,7 +364,6 @@ impl App {
       hints.push(hint("p", "procs"));
     }
     hints.extend([
-      hint("v", self.cfg.view_type.label()),
       hint("r", self.cfg.ratio_mode.label()),
       hint("-/+", format!("{}ms", self.cfg.interval())),
       hint("[/]", format!("{}ms", self.cfg.proc_interval())),
@@ -385,10 +382,7 @@ impl App {
       let inner = draw_box(f, r, fit_titles(r.width, metric.titles));
       let graph = Graph::new(metric.data).three_levels(self.three_level_bars);
       match metric.scale {
-        Scale::Load { load, .. } if self.cfg.view_type == ViewType::Gauge => {
-          f.render_widget(Gauge::new(load), inner)
-        }
-        Scale::Load { max, .. } => f.render_widget(graph.max(max), inner),
+        Scale::Load { max } => f.render_widget(graph.max(max), inner),
         Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
         Scale::Net => {
           self.render_net_graphs(f, inner);
@@ -397,7 +391,7 @@ impl App {
           }
         }
         Scale::Ram { max, colors } => {
-          if self.cfg.view_type == ViewType::Gauge || inner.height < 2 {
+          if inner.height < 2 {
             f.render_widget(self.ram_bar(), inner);
           } else {
             f.render_widget(self.ram_bar(), Rect { height: 1, ..inner });
@@ -484,8 +478,8 @@ impl App {
     }
   }
 
-  /// `CPU 60%` (colored by load) over the usage history of the whole CPU scaled to 100 %, or a
-  /// gauge. The usage is the clusters' weighted by core count; they go on the bottom border (see
+  /// `CPU 60%` (colored by load) over the usage history of the whole CPU scaled to 100 %. The usage
+  /// is the clusters' weighted by core count; they go on the bottom border (see
   /// `cluster_summary`).
   fn cpu_box(&self) -> MetricBox<'_> {
     let series = self.cpu.ratio(self.cfg.ratio_mode);
@@ -493,7 +487,7 @@ impl App {
     MetricBox {
       titles: vec![Titles::new(title)],
       data: &series.items,
-      scale: Scale::Load { max: 100, load: series.ratio },
+      scale: Scale::Load { max: 100 },
     }
   }
 
@@ -523,7 +517,7 @@ impl App {
   }
 
   /// `GPU 23% @ 1400 MHz` (the percent colored by load), or `GPU 23%` when the frequency
-  /// doesn't fit, over the usage history scaled to 100 %, or a gauge.
+  /// doesn't fit, over the usage history scaled to 100 %.
   fn freq_box<'a>(&self, label: String, freq: &'a FreqStore) -> MetricBox<'a> {
     let series = freq.ratio(self.cfg.ratio_mode);
     let short = vec![heading(label), text(" "), self.percent(series.ratio, 0)];
@@ -533,7 +527,7 @@ impl App {
     MetricBox {
       titles: vec![Titles::new(full), Titles::new(short)],
       data: &series.items,
-      scale: Scale::Load { max: 100, load: series.ratio },
+      scale: Scale::Load { max: 100 },
     }
   }
 

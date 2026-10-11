@@ -1,9 +1,8 @@
-//! History graph, gauge and segmented bar widgets.
+//! History graph and segmented bar widgets.
 //!
-//! Both are drawn here rather than with ratatui's `Sparkline` / `Gauge`: `Sparkline` rounds bars
-//! down (a small non-zero sample stays blank) and scales to the largest sample of all its data
-//! (not only the columns on screen), and `Gauge` with an empty label still paints a reversed blank
-//! cell in the middle of its middle row.
+//! The graph is drawn here rather than with ratatui's `Sparkline`, which rounds bars down (a small
+//! non-zero sample stays blank) and scales to the largest sample of all its data (not only the
+//! columns on screen).
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -16,37 +15,10 @@ use super::theme::gradient;
 const BAR_LEVELS: u64 = 8;
 /// Code point before `▁`: the bar of level `n` is `BAR_BASE + n`.
 const BAR_BASE: u32 = 0x2580;
-/// Filled cell of a gauge, and of a full bar.
+/// Filled cell of a full bar.
 const FULL: char = '█';
 /// Half-filled cell of a three-level bar.
 const HALF: char = '▄';
-
-/// Gauge view of the original macmon: a bar across its whole area, filled from the left to `ratio`
-/// (rounded to whole cells) in the load color of `ratio`; the rest stays blank.
-pub(super) struct Gauge {
-  ratio: f64,
-}
-
-impl Gauge {
-  /// Gauge for `ratio` in `0.0..=1.0`, clamped outside the range.
-  pub(super) fn new(ratio: f64) -> Self {
-    Self { ratio: if ratio.is_nan() { 0.0 } else { ratio.clamp(0.0, 1.0) } }
-  }
-}
-
-impl Widget for Gauge {
-  fn render(self, area: Rect, buf: &mut Buffer) {
-    let area = area.intersection(buf.area);
-    // at most `area.width`, as the ratio is at most 1
-    let filled = (f64::from(area.width) * self.ratio).round() as u16;
-    let color = gradient(self.ratio);
-    for y in area.top()..area.bottom() {
-      for x in area.left()..area.left() + filled {
-        buf[(x, y)].set_char(FULL).set_fg(color);
-      }
-    }
-  }
-}
 
 /// Bar of segments side by side over its whole area, left to right: each segment takes its share
 /// of `total` in cells, in its color; the rest of the bar stays blank. Cell edges are rounded from
@@ -192,7 +164,7 @@ mod tests {
   use ratatui::style::Color;
   use ratatui::widgets::Widget;
 
-  use super::{Gauge, Graph, SegmentBar};
+  use super::{Graph, SegmentBar};
   use crate::tui::theme::gradient;
 
   fn draw(widget: impl Widget, width: u16, height: u16) -> Buffer {
@@ -273,19 +245,5 @@ mod tests {
     let levels: Vec<u64> = (1..=16).rev().collect();
     let buf = draw(Graph::new(&levels).max(16).three_levels(true), 16, 2);
     assert_eq!(rows(&buf), ["         ▄▄▄▄▄██", " ▄▄▄▄▄██████████"]);
-  }
-
-  #[test]
-  fn gauge_fills_its_ratio_of_every_row() {
-    // (ratio, width, filled cells): rounded to whole cells, clamped to the range
-    let cases =
-      [(0.0, 10, 0), (0.5, 10, 5), (0.556, 48, 27), (0.04, 10, 0), (1.5, 4, 4), (f64::NAN, 4, 0)];
-    for (ratio, width, filled) in cases {
-      let buf = draw(Gauge::new(ratio), width, 3);
-      let row = format!("{}{}", "█".repeat(filled), " ".repeat(usize::from(width) - filled));
-      assert_eq!(rows(&buf), vec![row; 3], "{ratio} in {width}");
-    }
-    // in the load color of the ratio
-    assert_eq!(draw(Gauge::new(0.5), 4, 1)[(0, 0)].fg, Color::Yellow);
   }
 }

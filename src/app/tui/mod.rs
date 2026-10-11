@@ -430,7 +430,6 @@ impl App {
       // a window too small for the list keeps it hidden whatever the setting says, so `p` would
       // change a setting without a change on screen
       KeyCode::Char('p') if self.procs_fit => self.cfg.toggle_procs(),
-      KeyCode::Char('v') => self.cfg.toggle_view_type(),
       _ => {}
     }
 
@@ -537,12 +536,12 @@ mod tests {
   use ratatui::crossterm::event::{
     EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
   };
-  use ratatui::layout::{Margin, Rect};
+  use ratatui::layout::Rect;
 
   use super::layout::Metric;
   use super::theme::{self, gradient};
   use super::{App, restore_term_once, run_procs_thread};
-  use crate::config::{Config, ProcSort, RatioMode, TUI_MIN_MS, TempConfig, ViewType};
+  use crate::config::{Config, ProcSort, RatioMode, TUI_MIN_MS, TempConfig};
   use crate::procs::ProcInfo;
 
   fn key(c: char) -> KeyEvent {
@@ -809,24 +808,11 @@ mod tests {
       assert_eq!(app.cfg.interval(), 1250, "{c}");
     }
 
-    // v: the load boxes become gauges filled to the load, saved under the released name
+    // the key hints show the settings; `v` (the gauge of released versions) does nothing
     assert!(app.handle_key(key('v')).is_continue());
-    assert_eq!(file.saved()["view_type"], "Gauge");
     let buf = render_buffer(&mut app, 200, 50);
-    let gauge = app.layout(buf.area).boxes[0].1.inner(Margin::new(1, 1));
-    // the CPU box: 65 % active
-    let filled = (f64::from(gauge.width) * 0.65).round() as usize;
-    let line = format!("{}{}", "█".repeat(filled), " ".repeat(usize::from(gauge.width) - filled));
-    for y in gauge.top()..gauge.bottom() {
-      let cells: String = (gauge.left()..gauge.right()).map(|x| buf[(x, y)].symbol()).collect();
-      assert_eq!(cells, line, "row {y}");
-    }
-    // the key hints show the settings
-    let hints = " v gauge | r active | -/+ 1250ms | [/] 4500ms ─╯";
+    let hints = "─ q quit | ? help | p procs | r active | -/+ 1250ms | [/] 4500ms ─╯";
     assert!(row(&buf, 49).ends_with(hints), "{}", row(&buf, 49));
-
-    assert!(app.handle_key(key('v')).is_continue());
-    assert_eq!(app.cfg.view_type, ViewType::Graph);
     assert_eq!(file.saved()["view_type"], "Sparkline");
   }
 
@@ -855,7 +841,7 @@ mod tests {
     assert!(!app.procs_visible());
     assert!(app.handle_key(key('p')).is_continue());
     assert!(app.cfg.show_procs);
-    assert!(row(&buf, 11).contains(" q quit | ? help | v graph "), "{}", row(&buf, 11));
+    assert!(row(&buf, 11).contains(" q quit | ? help | r scaled "), "{}", row(&buf, 11));
   }
 
   #[test]
@@ -947,7 +933,7 @@ mod tests {
       assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?} while typing");
     }
     assert_eq!(app.proc_view.filter(), "qvrp+-s?");
-    assert_eq!((app.cfg.view_type, app.cfg.ratio_mode), (ViewType::Graph, RatioMode::Scaled));
+    assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
     assert_eq!((app.cfg.interval(), app.cfg.show_procs), (1000, true));
     assert_eq!((app.cfg.proc_sort, app.help), (ProcSort::Cpu, None));
 
@@ -1323,14 +1309,6 @@ mod tests {
       let x = area.left() + x_of(&top, "91%");
       assert_eq!(buf[(x, area.y)].fg, color, "{rate}");
     }
-
-    // `v`: the bar over the whole box
-    app.cfg.view_type = crate::config::ViewType::Gauge;
-    let buf = render_buffer(&mut app, 152, 50);
-    for y in area.y + 1..area.bottom() - 1 {
-      let cells: String = inner.clone().map(|x| buf[(x, y)].symbol()).collect();
-      assert_eq!(cells.matches('█').count(), 45, "row {y}");
-    }
   }
 
   #[test]
@@ -1394,7 +1372,7 @@ mod tests {
     // the PID and the full path, cut from the left to the room the key hints leave
     assert!(press(&mut app, KeyCode::Down).is_continue());
     assert!(bottom(&mut app, 200).starts_with(&format!("╰─ 631 {WINDOW_SERVER} ─")));
-    let cut = format!("╰─ 631 …{} ─ q quit |", &WINDOW_SERVER[WINDOW_SERVER.len() - 34..]);
+    let cut = format!("╰─ 631 …{} ─ q quit |", &WINDOW_SERVER[WINDOW_SERVER.len() - 44..]);
     assert!(bottom(&mut app, 120).starts_with(&cut), "{}", bottom(&mut app, 120));
 
     // without a readable path: the name

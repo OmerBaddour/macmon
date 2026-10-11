@@ -11,8 +11,9 @@ use serde_json::{Map, Value};
 pub(crate) const TUI_MIN_MS: u32 = 250;
 pub(crate) const TUI_MAX_MS: u32 = 10_000;
 
-/// Look of the CPU cluster, GPU and RAM boxes (`v`). Saved under the names of released versions,
-/// so their configs keep the user's choice and they read ours.
+/// Look of the load boxes in released versions (`v` there). This fork always draws graphs; the
+/// setting is still read and saved back unchanged, under the names of released versions, so a
+/// released version run on the same file keeps the user's choice.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
 pub enum ViewType {
   /// History graph (`Sparkline` in released versions).
@@ -20,15 +21,6 @@ pub enum ViewType {
   Graph,
   /// Bar filled to the current load.
   Gauge,
-}
-
-impl ViewType {
-  pub fn label(self) -> &'static str {
-    match self {
-      Self::Graph => "graph",
-      Self::Gauge => "gauge",
-    }
-  }
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
@@ -63,7 +55,7 @@ pub enum ProcSort {
 #[serde_inline_default]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
-  /// Graph or gauge in the CPU cluster, GPU and RAM boxes (`v`).
+  /// Graph or gauge in released versions; unused here (see `ViewType`).
   #[serde_inline_default(ViewType::Graph)]
   pub view_type: ViewType,
 
@@ -250,14 +242,6 @@ impl Config {
       .set_proc_interval((self.proc_interval().saturating_add(step) / step * step).min(TUI_MAX_MS));
   }
 
-  pub fn toggle_view_type(&mut self) {
-    self.view_type = match self.view_type {
-      ViewType::Graph => ViewType::Gauge,
-      ViewType::Gauge => ViewType::Graph,
-    };
-    self.save();
-  }
-
   pub fn toggle_ratio_mode(&mut self) {
     self.ratio_mode = match self.ratio_mode {
       RatioMode::Scaled => RatioMode::Active,
@@ -355,6 +339,18 @@ mod tests {
   }
 
   #[test]
+  fn view_type_of_released_versions_is_kept() {
+    // unused here, but saved back as it was on any change
+    let file = TempConfig::new("view_type_of_released_versions_is_kept");
+    let path = file.path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, r#"{"view_type": "Gauge"}"#).unwrap();
+    let mut cfg = Config::load_from(Some(file.path()));
+    cfg.toggle_procs();
+    assert_eq!(file.saved()["view_type"], "Gauge");
+  }
+
+  #[test]
   fn bad_values_fall_back_one_field_at_a_time() {
     // each bad value gets its default, the good ones stay
     let cfg = parse(
@@ -385,8 +381,6 @@ mod tests {
     let saved = |field: &str| file.saved()[field].clone();
     cfg.toggle_procs();
     assert_eq!(saved("show_procs"), false);
-    cfg.toggle_view_type();
-    assert_eq!(saved("view_type"), "Gauge");
     cfg.toggle_ratio_mode();
     assert_eq!(saved("ratio_mode"), "Active");
     cfg.inc_interval();
@@ -396,7 +390,7 @@ mod tests {
 
     // the next run starts where this one stopped
     let cfg = Config::load_from(Some(file.path()));
-    assert_eq!((cfg.show_procs, cfg.view_type), (false, ViewType::Gauge));
+    assert!(!cfg.show_procs);
     assert_eq!((cfg.ratio_mode, cfg.interval), (RatioMode::Active, 1250));
     assert_eq!((cfg.proc_sort, cfg.proc_sort_desc), (ProcSort::Name, false));
   }
