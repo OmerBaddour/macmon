@@ -1,10 +1,13 @@
-//! Metrics box (the metric boxes of the original macmon: CPU clusters, GPU, RAM, CPU / GPU / ANE
-//! power) and the box frame it shares with the process list: rounded borders, titles fitted on
-//! the top border, a text and the key hints on the bottom border.
+//! Metrics box (the metric boxes of the original macmon: CPU clusters, GPU, RAM, CPU / GPU power,
+//! with a network box in place of ANE power) and the box frame it shares with the process list:
+//! rounded borders, titles fitted on the top border, a text and the key hints on the bottom border.
 //!
 //! The RAM box goes further than the original: a bar of the kinds of RAM (wired / app /
 //! compressed / cached, as Activity Monitor splits it), the history colored by memory pressure,
 //! the pressure on the top border, and the legend and swap rates on its bottom border.
+//!
+//! The network box shows download over upload, both graphs on one scale so they compare, with the
+//! current rates on the top border and the peaks on screen on the bottom border.
 
 use std::ops::Range;
 
@@ -21,8 +24,8 @@ use super::layout::{LayoutPlan, Metric};
 use super::proc_view::{ELLIPSIS, head};
 use super::store::{FreqStore, PowerStore, ratio};
 use super::theme::{
-  self, RAM_APP, RAM_CACHED, RAM_COMPRESSED, RAM_WIRED, dim, gradient, heading, pressure_color,
-  text,
+  self, NET_RX, NET_TX, RAM_APP, RAM_CACHED, RAM_COMPRESSED, RAM_WIRED, dim, gradient, heading,
+  pressure_color, text,
 };
 use super::widgets::{Gauge, Graph, SegmentBar};
 use crate::config::ViewType;
@@ -36,6 +39,31 @@ const BORDER_TEXT_MIN: u16 = 8;
 /// Swap traffic (in and out, bytes per second) from which the swap part of the RAM title is red
 /// instead of yellow: 10 MiB/s.
 const SWAP_RED_RATE: u64 = 10 << 20;
+/// Lowest full height of the network graphs, in bytes per second: background traffic of a few
+/// KB/s stays flat instead of filling the box.
+const NET_MIN_SCALE: u64 = 1_000_000;
+
+/// `bytes_per_sec` in decimal units, as Activity Monitor shows network rates, with 3 significant
+/// digits at most: `512 B/s`, `1.5 KB/s`, `12.3 MB/s`, `123 MB/s`. `short` gives `512B`, `1.5K`,
+/// `12.3M`.
+fn rate(bytes_per_sec: u64, short: bool) -> String {
+  let units = ["B", "K", "M", "G", "T"];
+  let mut value = bytes_per_sec as f64;
+  let mut unit = 0;
+  // 999.95 KB/s would print as 1000.0 KB/s
+  while value >= 999.5 && unit + 1 < units.len() {
+    value /= 1000.0;
+    unit += 1;
+  }
+
+  let number =
+    if unit == 0 || value >= 99.95 { format!("{value:.0}") } else { format!("{value:.1}") };
+  match (short, unit) {
+    (true, _) => format!("{number}{}", units[unit]),
+    (false, 0) => format!("{number} B/s"),
+    (false, _) => format!("{number} {}B/s", units[unit]),
+  }
+}
 
 /// Temperature position on the load gradient: 30 °C is cool, 100 °C is hot.
 fn temp_ratio(celsius: f32) -> f64 {
@@ -301,6 +329,8 @@ enum Scale {
   /// RAM: the bar of the kinds of RAM on the top row over the history scaled to `max`, each sample
   /// in its color (the pressure at the time); `v` switches to the bar over the whole box.
   Ram { max: u64, colors: Vec<Color> },
+  /// Network: download over upload (see `render_net_graphs`); no gauge.
+  Net,
 }
 
 /// Titles and graph of one metric box.
@@ -357,6 +387,12 @@ impl App {
         }
         Scale::Load { max, .. } => f.render_widget(graph.max(max), inner),
         Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
+        Scale::Net => {
+          self.render_net_graphs(f, inner);
+          if r.height >= 2 {
+            render_bottom_border(f, r, vec![], |room| self.net_peaks(inner.width, room));
+          }
+        }
         Scale::Ram { max, colors } => {
           if self.cfg.view_type == ViewType::Gauge || inner.height < 2 {
             f.render_widget(self.ram_bar(), inner);
@@ -441,7 +477,7 @@ impl App {
       Metric::Ram => self.ram_box(),
       Metric::CpuPower => self.power_box("CPU", &self.cpu_power, self.cpu_temp.last()),
       Metric::GpuPower => self.power_box("GPU", &self.gpu_power, self.gpu_temp.last()),
-      Metric::AnePower => self.power_box("ANE", &self.ane_power, None),
+      Metric::Network => self.net_box(),
     }
   }
 
@@ -594,6 +630,69 @@ impl App {
     [full, short].into_iter().find(fits).unwrap_or(shortest)
   }
 
+  /// `NET ↓ 12.3 MB/s ↑ 450 KB/s`, then `↓ 12.3 MB/s ↑ 450 KB/s`, then `↓12.3M ↑450K`: the
+  /// current download and upload rates, the arrows in the colors of their graphs.
+  fn net_box(&self) -> MetricBox<'_> {
+    let last = self.net.last;
+    let arrows = |short: bool| {
+      let gap = if short { "" } else { " " };
+      vec![
+        Span::styled("↓", NET_RX),
+        text(format!("{gap}{}", rate(last.rx_rate, short))),
+        text(" "),
+        Span::styled("↑", NET_TX),
+        text(format!("{gap}{}", rate(last.tx_rate, short))),
+      ]
+    };
+    let full = [&[heading("NET"), text(" ")][..], &arrows(false)].concat();
+
+    let titles = vec![Titles::new(full), Titles::new(arrows(false)), Titles::new(arrows(true))];
+    MetricBox { titles, data: &self.net.rx, scale: Scale::Net }
+  }
+
+  /// Graph scale of the network box `width` columns wide: the larger peak of the two histories on
+  /// screen, at least `NET_MIN_SCALE`.
+  fn net_scale(&self, width: u16) -> u64 {
+    let peak = |data: &[u64]| data.iter().take(usize::from(width)).copied().max().unwrap_or(0);
+    peak(&self.net.rx).max(peak(&self.net.tx)).max(NET_MIN_SCALE)
+  }
+
+  /// Download graph over the upload graph in `area` on one scale (`net_scale`), the download
+  /// graph taking the odd row; with a single row, download only.
+  fn render_net_graphs(&self, f: &mut Frame, area: Rect) {
+    let max = self.net_scale(area.width);
+    let graph = |data| Graph::new(data).three_levels(self.three_level_bars).max(max);
+    let upper = area.height.div_ceil(2);
+    f.render_widget(graph(&self.net.rx).color(NET_RX), Rect { height: upper, ..area });
+    let lower = Rect { y: area.y + upper, height: area.height - upper, ..area };
+    f.render_widget(graph(&self.net.tx).color(NET_TX), lower);
+  }
+
+  /// Peaks of the histories on screen in a network box `width` columns wide, for its bottom
+  /// border: `peak ↓ 98.2 MB/s ↑ 2.1 MB/s`, or `↓98.2M ↑2.1M` when that doesn't fit in `room`.
+  fn net_peaks(&self, width: u16, room: usize) -> Vec<Span<'static>> {
+    let peak = |data: &[u64]| data.iter().take(usize::from(width)).copied().max().unwrap_or(0);
+    let (rx, tx) = (peak(&self.net.rx), peak(&self.net.tx));
+    let full = vec![
+      dim("peak "),
+      Span::styled("↓", NET_RX),
+      text(format!(" {}", rate(rx, false))),
+      text(" "),
+      Span::styled("↑", NET_TX),
+      text(format!(" {}", rate(tx, false))),
+    ];
+    if full.iter().map(Span::width).sum::<usize>() <= room {
+      return full;
+    }
+    vec![
+      Span::styled("↓", NET_RX),
+      text(rate(rx, true)),
+      text(" "),
+      Span::styled("↑", NET_TX),
+      text(rate(tx, true)),
+    ]
+  }
+
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when
   /// that doesn't fit, with the temperature (`45°C`) on the right when the sensor exists, over the
   /// power history in the low load color, scaled to its largest visible sample. Always a graph,
@@ -630,7 +729,7 @@ mod tests {
   use ratatui::layout::Rect;
   use ratatui::style::Style;
 
-  use super::{Titles, fit_titles, hint, place_titles, render_bottom_border};
+  use super::{Titles, fit_titles, hint, place_titles, rate, render_bottom_border};
   use crate::tui::theme::{dim, text};
 
   /// Top border of a box `width` cells wide with `titles` drawn on it.
@@ -658,6 +757,31 @@ mod tests {
     // none fits: the last one is cut
     assert_eq!(fitted(14), "── CPU 4.50W──");
     assert_eq!(fitted(10), "── CPU 4──");
+  }
+
+  #[test]
+  fn rates_have_three_digits_at_most() {
+    let cases = [
+      (0, "0 B/s", "0B"),
+      (512, "512 B/s", "512B"),
+      (999, "999 B/s", "999B"),
+      (1_000, "1.0 KB/s", "1.0K"),
+      (1_540, "1.5 KB/s", "1.5K"),
+      (99_940, "99.9 KB/s", "99.9K"),
+      (99_960, "100 KB/s", "100K"),
+      (999_400, "999 KB/s", "999K"),
+      // would round to 1000 KB/s
+      (999_600, "1.0 MB/s", "1.0M"),
+      (12_345_678, "12.3 MB/s", "12.3M"),
+      (1_260_000_000, "1.3 GB/s", "1.3G"),
+    ];
+    for (bytes, full, short) in cases {
+      assert_eq!(
+        (rate(bytes, false).as_str(), rate(bytes, true).as_str()),
+        (full, short),
+        "{bytes}"
+      );
+    }
   }
 
   #[test]

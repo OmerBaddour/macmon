@@ -24,7 +24,9 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::{ExecutableCommand, cursor, terminal};
 use ratatui::prelude::*;
-use store::{CpuClusters, FanStore, FreqSample, FreqStore, MemoryStore, PowerStore, TempStore};
+use store::{
+  CpuClusters, FanStore, FreqSample, FreqStore, MemoryStore, NetStore, PowerStore, TempStore,
+};
 
 use crate::config::{Config, TUI_MIN_MS};
 use crate::procs::{ProcInfo, ProcSampler};
@@ -277,10 +279,10 @@ pub struct App {
 
   soc: SocInfo,
   mem: MemoryStore,
+  net: NetStore,
 
   cpu_power: PowerStore,
   gpu_power: PowerStore,
-  ane_power: PowerStore,
   all_power: PowerStore,
   sys_power: PowerStore,
 
@@ -320,7 +322,6 @@ impl App {
   fn update_metrics(&mut self, data: Metrics) {
     self.cpu_power.push(data.cpu_power as f64);
     self.gpu_power.push(data.gpu_power as f64);
-    self.ane_power.push(data.ane_power as f64);
     self.all_power.push(data.all_power as f64);
     self.sys_power.push(data.sys_power as f64);
 
@@ -333,6 +334,7 @@ impl App {
     self.fans.push(data.fans);
 
     self.mem.push(data.memory);
+    self.net.push(data.network);
   }
 
   fn procs_visible(&self) -> bool {
@@ -523,7 +525,7 @@ mod tests {
   use std::sync::{Arc, Mutex, RwLock, mpsc};
   use std::time::Duration;
 
-  use macmon::{FanMetric, MemMetrics, MemPressure, Metrics, SocInfo, TempMetrics};
+  use macmon::{FanMetric, MemMetrics, MemPressure, Metrics, NetMetrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::{Buffer, CellDiffOption};
@@ -534,7 +536,7 @@ mod tests {
   use ratatui::layout::{Margin, Rect};
 
   use super::layout::Metric;
-  use super::theme::gradient;
+  use super::theme::{self, gradient};
   use super::{App, restore_term_once, run_procs_thread};
   use crate::config::{Config, ProcSort, RatioMode, TUI_MIN_MS, TempConfig, ViewType};
   use crate::procs::ProcInfo;
@@ -584,6 +586,7 @@ mod tests {
         swap_usage: 1 << 30,
         ..Default::default()
       },
+      network: NetMetrics { rx_rate: 12_345_678, tx_rate: 450_000 },
       fans: vec![FanMetric { name: "fan0".to_string(), rpm: 1200, max_rpm: Some(6000) }],
       ecpu_freq_mhz: 1800,
       ecpu_scaled_ratio: 0.42,
@@ -1053,7 +1056,7 @@ mod tests {
   #[test]
   fn renders_every_box_at_any_size() {
     use Metric::*;
-    let every_box = [Cluster(0), Cluster(1), Gpu, Ram, CpuPower, GpuPower, AnePower];
+    let every_box = [Cluster(0), Cluster(1), Gpu, Ram, CpuPower, GpuPower, Network];
     let sizes = [
       (400, 120),
       (200, 50),
@@ -1107,7 +1110,7 @@ mod tests {
     "RAM 20.00 GB (55.6%) · SWAP 1.00 / 2.0 GB",
     "CPU 4.50W (4.50, 4.50)",
     "GPU 2.00W (2.00, 2.00)",
-    "ANE 0.10W (0.10, 0.10)",
+    "NET ↓ 12.3 MB/s ↑ 450 KB/s",
   ];
 
   /// Top border of the metric box `metric` in a rendered frame.
@@ -1115,6 +1118,40 @@ mod tests {
     let boxes = app.layout(buf.area).boxes;
     let (_, area) = boxes.into_iter().find(|(m, _)| *m == metric).expect("metric box");
     (area.left()..area.right()).map(|x| buf[(x, area.y)].symbol()).collect()
+  }
+
+  #[test]
+  fn network_box_draws_download_over_upload_on_one_scale() {
+    // an idle sample, then 4 MB/s down and 1 MB/s up
+    let mut app = test_app_with(|m| m.network = NetMetrics::default());
+    app.update_metrics(Metrics {
+      network: NetMetrics { rx_rate: 4_000_000, tx_rate: 1_000_000 },
+      ..test_metrics()
+    });
+    let buf = render_buffer(&mut app, 200, 50);
+    let (_, area) =
+      app.layout(buf.area).boxes.into_iter().find(|(m, _)| *m == Metric::Network).unwrap();
+    let inner = area.inner(ratatui::layout::Margin::new(1, 1));
+    let upper = inner.height.div_ceil(2);
+    let column = |x: u16, rows: std::ops::Range<u16>| {
+      rows.filter(|&y| buf[(x, y)].symbol() != " ").map(|y| buf[(x, y)].fg).collect::<Vec<_>>()
+    };
+
+    // newest column: download fills its half (the peak on screen), upload a quarter of its own
+    let x = inner.right() - 1;
+    let down = column(x, inner.y..inner.y + upper);
+    assert_eq!(down, vec![theme::NET_RX; usize::from(upper)]);
+    let up = column(x, inner.y + upper..inner.bottom());
+    assert!(!up.is_empty() && up.len() < usize::from(inner.height - upper) / 2 + 1, "{up:?}");
+    assert!(up.iter().all(|&c| c == theme::NET_TX));
+    // the idle sample before stays blank
+    assert!(column(x - 1, inner.y..inner.bottom()).is_empty());
+
+    let top = box_top(&app, &buf, Metric::Network);
+    assert!(top.starts_with("╭─ NET ↓ 4.0 MB/s ↑ 1.0 MB/s ─"), "{top}");
+    let bottom: String =
+      (area.left()..area.right()).map(|x| buf[(x, area.bottom() - 1)].symbol()).collect();
+    assert!(bottom.starts_with("╰─ peak ↓ 4.0 MB/s ↑ 1.0 MB/s ─"), "{bottom}");
   }
 
   #[test]
@@ -1129,10 +1166,10 @@ mod tests {
     let version = format!("─ macmon v{} ─╮", env!("CARGO_PKG_VERSION"));
     let top = row(&buf, 0);
     assert!(top.starts_with("╭─ Apple M3 Pro (6E+6P+18GPU 36GB) ─") && top.ends_with(&version));
-    // whole-degree temperatures right on the CPU / GPU power boxes, none for ANE
+    // whole-degree temperatures right on the CPU / GPU power boxes, none for the network
     assert!(box_top(&app, &buf, Metric::CpuPower).ends_with("─ 45°C ─╮"));
     assert!(box_top(&app, &buf, Metric::GpuPower).ends_with("─ 40°C ─╮"));
-    assert!(box_top(&app, &buf, Metric::AnePower).ends_with("───╮"));
+    assert!(box_top(&app, &buf, Metric::Network).ends_with("───╮"));
     // the power summary on the bottom border of the metrics box
     let summary = "╰─ Power 6.60W (6.60, 6.60) | Fan 1200 RPM | Total 12.00W (12.00, 12.00) ─";
     assert!(row(&buf, PROC_Y - 1).starts_with(summary), "{}", row(&buf, PROC_Y - 1));

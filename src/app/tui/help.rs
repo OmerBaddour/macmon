@@ -41,6 +41,7 @@ const HELP: &[Row] = &[
   Key("RAM bar", "wired / app / compressed / cached; free blank"),
   Key("RAM graph", "colored by memory pressure, as Activity Monitor"),
   Key("SWAP ⇅", "swapping now: yellow, red from 10 MB/s"),
+  Key("NET", "download over upload on one scale; VPN traffic counts once"),
 ];
 
 /// Cells of the key column, the gap after it included.

@@ -21,6 +21,7 @@
 - ⚡ Real-time CPU / GPU / ANE power usage
 - 📊 CPU frequency-scaled and active ratios per cluster
 - 💾 RAM / Swap usage, with wired / app / compressed / cached RAM, memory pressure and swap rates
+- 🌐 Network download / upload throughput
 - 📈 Historical charts with average and max values
 - 🌡️ Average CPU / GPU temperature
 - 📋 Process list with per-process CPU, memory, power and GPU usage
@@ -226,6 +227,10 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
     "pressure": "Normal", // "Normal" / "Warning" / "Critical", null when unavailable
     "swap_in_rate": 0, // Bytes per second
     "swap_out_rate": 0, // Bytes per second
+  },
+  "network": {
+    "rx_rate": 1843200, // Bytes received per second, without loopback, tunnels and bridges
+    "tx_rate": 40960, // Bytes sent per second
   },
   "fans": [
     { "name": "fan0", "rpm": 999, "max_rpm": 4900 },

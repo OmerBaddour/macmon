@@ -67,6 +67,8 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
     };
     gauge!(out, "memory_pressure", "Memory pressure: 0 normal, 1 warning, 2 critical", level);
   }
+  gauge!(out, "network_receive_bytes_per_second", "Bytes received per second, without loopback, tunnels and bridges", m.network.rx_rate);
+  gauge!(out, "network_transmit_bytes_per_second", "Bytes sent per second, without loopback, tunnels and bridges", m.network.tx_rate);
   gauge!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);

@@ -11,7 +11,7 @@ use crate::shared::{
 };
 use crate::sources::{
   IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, get_soc_info, libc_ram,
-  libc_ram_breakdown, libc_swap, sysctl_mem_pressure,
+  libc_ram_breakdown, libc_swap, net_bytes, sysctl_mem_pressure,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -57,6 +57,18 @@ impl PowerSources {
 fn per_second(bytes: u64, elapsed: Duration) -> u64 {
   let secs = elapsed.as_secs_f64();
   if secs > 0.0 { (bytes as f64 / secs).round() as u64 } else { 0 }
+}
+
+/// Per-second rates of two counters over `elapsed` since `prev`, which becomes `now`; zero on the
+/// first call (no `prev`) and for a counter that went down (reset, or an interface gone).
+fn rates(prev: &mut Option<(u64, u64)>, now: (u64, u64), elapsed: Duration) -> (u64, u64) {
+  match prev.replace(now) {
+    Some(prev) => (
+      per_second(now.0.saturating_sub(prev.0), elapsed),
+      per_second(now.1.saturating_sub(prev.1), elapsed),
+    ),
+    None => (0, 0),
+  }
 }
 
 // MARK: Structs
@@ -127,6 +139,16 @@ pub struct MemMetrics {
   pub swap_out_rate: u64,
 }
 
+/// Network throughput over all interfaces but loopback, tunnels and bridges, which would count
+/// the same traffic twice (see [`crate::sources::NetInterface::counted`]).
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct NetMetrics {
+  /// Bytes received over the sampling interval, per second.
+  pub rx_rate: u64,
+  /// Bytes sent over the sampling interval, per second.
+  pub tx_rate: u64,
+}
+
 /// Fan speed metrics.
 #[derive(Debug, Default, Serialize)]
 pub struct FanMetric {
@@ -183,6 +205,8 @@ pub struct Metrics {
   pub temp: TempMetrics,
   /// Memory and swap metrics.
   pub memory: MemMetrics,
+  /// Network throughput.
+  pub network: NetMetrics,
   /// Fan metrics ordered by stable SMC fan key order.
   pub fans: Vec<FanMetric>,
   /// Combined frequency-weighted active residency across all CPU cores.
@@ -458,6 +482,8 @@ pub struct Sampler {
   smc_fan_keys: Vec<String>,
   /// Bytes swapped in and out since boot at the previous sample, for the swap rates.
   prev_swapped: Option<(u64, u64)>,
+  /// Bytes received and sent since boot at the previous sample, for the network rates.
+  prev_net: Option<(u64, u64)>,
 }
 
 impl Sampler {
@@ -478,6 +504,7 @@ impl Sampler {
       smc_gpu_keys: smc_sensors.gpu_keys,
       smc_fan_keys: smc_sensors.fan_keys,
       prev_swapped: None,
+      prev_net: None,
     })
   }
 
@@ -563,14 +590,8 @@ impl Sampler {
     let (swap_usage, swap_total) = libc_swap()?;
     let ram = libc_ram_breakdown()?;
 
-    let swapped = (ram.swapped_in, ram.swapped_out);
-    let (swap_in_rate, swap_out_rate) = match self.prev_swapped.replace(swapped) {
-      Some(prev) => (
-        per_second(swapped.0.saturating_sub(prev.0), elapsed),
-        per_second(swapped.1.saturating_sub(prev.1), elapsed),
-      ),
-      None => (0, 0),
-    };
+    let (swap_in_rate, swap_out_rate) =
+      rates(&mut self.prev_swapped, (ram.swapped_in, ram.swapped_out), elapsed);
 
     Ok(MemMetrics {
       ram_total,
@@ -586,6 +607,14 @@ impl Sampler {
       swap_in_rate,
       swap_out_rate,
     })
+  }
+
+  /// Network rates over `elapsed` since the previous call: zero on the first, and when the
+  /// counters can't be read.
+  fn get_net(&mut self, elapsed: Duration) -> NetMetrics {
+    let Ok(bytes) = net_bytes() else { return NetMetrics::default() };
+    let (rx_rate, tx_rate) = rates(&mut self.prev_net, bytes, elapsed);
+    NetMetrics { rx_rate, tx_rate }
   }
 
   fn get_sys_power(&mut self) -> WithError<f32> {
@@ -703,6 +732,7 @@ impl Sampler {
     let mut rs = aggregate_ioreport_metrics(self.get_ioreport_metrics(sample, elapsed)?, &self.soc);
 
     rs.memory = self.get_mem(elapsed)?;
+    rs.network = self.get_net(elapsed);
     rs.temp = self.get_temp()?;
     rs.fans = self.get_fans();
 
@@ -728,7 +758,7 @@ mod tests {
   use super::{
     CpuCoreKind, CpuCoreMetrics, MemPressure, Metrics, PowerSources, TempMetrics,
     aggregate_ioreport_metrics, calc_freq_from_residencies, collect_cpu_core_metrics,
-    parse_cpu_core_channel, per_second, smc_numeric_value, temperature_average,
+    parse_cpu_core_channel, per_second, rates, smc_numeric_value, temperature_average,
   };
   use crate::sources::SocInfo;
 
@@ -745,6 +775,17 @@ mod tests {
     assert_eq!(per_second(3 << 20, Duration::from_millis(500)), 6 << 20);
     assert_eq!(per_second(1000, Duration::from_secs(3)), 333);
     assert_eq!(per_second(1000, Duration::ZERO), 0);
+  }
+
+  #[test]
+  fn rates_start_at_zero_and_skip_counter_drops() {
+    let mut prev = None;
+    let second = Duration::from_secs(1);
+    assert_eq!(rates(&mut prev, (1000, 500), second), (0, 0));
+    assert_eq!(rates(&mut prev, (3000, 600), Duration::from_millis(500)), (4000, 200));
+    // an interface that went down takes its bytes along: no negative rate
+    assert_eq!(rates(&mut prev, (100, 700), second), (0, 100));
+    assert_eq!(prev, Some((100, 700)));
   }
 
   #[test]

@@ -1,6 +1,6 @@
 //! Metric history stores used by the terminal UI.
 
-use macmon::{FanMetric, MemMetrics, MemPressure, Metrics, SocInfo};
+use macmon::{FanMetric, MemMetrics, MemPressure, Metrics, NetMetrics, SocInfo};
 
 use crate::config::RatioMode;
 
@@ -171,6 +171,24 @@ impl MemoryStore {
   }
 }
 
+/// Network rates (bytes per second) with their histories, newest first.
+#[derive(Debug, Default)]
+pub(super) struct NetStore {
+  pub(super) rx: Vec<u64>,
+  pub(super) tx: Vec<u64>,
+  pub(super) last: NetMetrics,
+}
+
+impl NetStore {
+  pub(super) fn push(&mut self, value: NetMetrics) {
+    self.rx.insert(0, value.rx_rate);
+    self.rx.truncate(HISTORY_LEN);
+    self.tx.insert(0, value.tx_rate);
+    self.tx.truncate(HISTORY_LEN);
+    self.last = value;
+  }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct TempStore {
   items: Vec<f32>,
@@ -245,10 +263,11 @@ pub(super) fn ratio(value: f64, total: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-  use macmon::MemMetrics;
+  use macmon::{MemMetrics, NetMetrics};
 
   use super::{
-    FreqSample, FreqStore, HISTORY_LEN, MAX_TEMPS, MemoryStore, PowerStore, STATS_LEN, TempStore,
+    FreqSample, FreqStore, HISTORY_LEN, MAX_TEMPS, MemoryStore, NetStore, PowerStore, STATS_LEN,
+    TempStore,
   };
   use crate::config::RatioMode;
 
@@ -282,7 +301,9 @@ mod tests {
   fn histories_are_capped() {
     let (mut power, mut freq) = (PowerStore::default(), FreqStore::default());
     let (mut mem, mut temp) = (MemoryStore::default(), TempStore::default());
+    let mut net = NetStore::default();
     for i in 0..HISTORY_LEN + 10 {
+      net.push(NetMetrics { rx_rate: i as u64, tx_rate: 2 * i as u64 });
       power.push(i as f64);
       freq.push(FreqSample::new(1000, 0.25, 0.5));
       mem.push(MemMetrics { ram_total: 100, ram_usage: i as u64, ..Default::default() });
@@ -294,6 +315,10 @@ mod tests {
     assert_eq!((power.items.len(), power.items[0]), (HISTORY_LEN, last * 1000));
     assert_eq!((mem.items.len(), mem.items[0]), (HISTORY_LEN, last));
     assert_eq!(mem.pressures.len(), HISTORY_LEN);
+    assert_eq!(
+      (net.rx.len(), net.rx[0], net.tx.len(), net.tx[0]),
+      (HISTORY_LEN, last, HISTORY_LEN, 2 * last)
+    );
     for mode in [RatioMode::Scaled, RatioMode::Active] {
       assert_eq!(freq.ratio(mode).items.len(), HISTORY_LEN, "{mode:?}");
     }

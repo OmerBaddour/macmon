@@ -81,7 +81,7 @@ pub mod sources;
 // Re-export the commonly used types.
 #[doc(inline)]
 pub use metrics::{
-  CpuCoreMetrics, FanMetric, MemMetrics, MemPressure, Metrics, Sampler, TempMetrics,
+  CpuCoreMetrics, FanMetric, MemMetrics, MemPressure, Metrics, NetMetrics, Sampler, TempMetrics,
 };
 #[doc(inline)]
 pub use sources::SocInfo;
