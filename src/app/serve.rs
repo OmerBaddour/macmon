@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use macmon::{Metrics, SocInfo};
+use macmon::{MemPressure, Metrics, SocInfo};
 
 use crate::metrics_to_json_value;
 
@@ -52,6 +52,21 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge!(out, "memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
   gauge!(out, "memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
   gauge!(out, "memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
+  gauge!(out, "memory_ram_wired_bytes", "Wired RAM in bytes", m.memory.ram_wired);
+  gauge!(out, "memory_ram_app_bytes", "App memory in bytes", m.memory.ram_app);
+  gauge!(out, "memory_ram_compressed_bytes", "RAM occupied by the compressor in bytes", m.memory.ram_compressed);
+  gauge!(out, "memory_ram_compressed_data_bytes", "Data stored in the compressor before compression in bytes", m.memory.ram_compressed_data);
+  gauge!(out, "memory_ram_cached_bytes", "Cached files and purgeable memory in bytes", m.memory.ram_cached);
+  gauge!(out, "memory_swap_in_bytes_per_second", "Swap-ins in bytes per second", m.memory.swap_in_rate);
+  gauge!(out, "memory_swap_out_bytes_per_second", "Swap-outs in bytes per second", m.memory.swap_out_rate);
+  if let Some(pressure) = m.memory.pressure {
+    let level = match pressure {
+      MemPressure::Normal => 0,
+      MemPressure::Warning => 1,
+      MemPressure::Critical => 2,
+    };
+    gauge!(out, "memory_pressure", "Memory pressure: 0 normal, 1 warning, 2 critical", level);
+  }
   gauge!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);

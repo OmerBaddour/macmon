@@ -38,6 +38,9 @@ const HELP: &[Row] = &[
   Key("CPU%", "100% is one fully busy core"),
   Key("scaled", "usage weighted by frequency; active: share of time busy"),
   Key("POWER -", "not available for other users' processes"),
+  Key("RAM bar", "wired / app / compressed / cached; free blank"),
+  Key("RAM graph", "colored by memory pressure, as Activity Monitor"),
+  Key("SWAP⇅", "swapping now: yellow, red from 10 MB/s"),
 ];
 
 /// Cells of the key column, the gap after it included.
