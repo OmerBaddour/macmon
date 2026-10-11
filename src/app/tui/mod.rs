@@ -670,6 +670,7 @@ mod tests {
       mem_bytes: 64 << 20,
       power_w: Some(0.5),
       gpu_pct: 3.0,
+      net: Some(NetMetrics::default()),
     };
     vec![proc(1, "launchd"), proc(631, "WindowServer"), proc(2301, "Safari")]
   }
@@ -678,7 +679,8 @@ mod tests {
   const WINDOW_SERVER: &str =
     "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/WindowServer";
 
-  /// Processes with different values, one of them (root's launchd) without a power reading.
+  /// Processes with different values, one of them (root's launchd) without a power reading; only
+  /// Safari on the network.
   fn varied_procs() -> Vec<ProcInfo> {
     let path = |name: &str| match name {
       "launchd" => "/sbin/launchd".to_string(),
@@ -694,6 +696,10 @@ mod tests {
       mem_bytes: mem_mb << 20,
       power_w,
       gpu_pct,
+      net: Some(NetMetrics {
+        rx_rate: if pid == 2301 { 2_400_000 } else { 0 },
+        tx_rate: if pid == 2301 { 51_000 } else { 0 },
+      }),
     };
     vec![
       proc(1, "launchd", 0.0, 20, None, 0.0),
@@ -1347,21 +1353,27 @@ mod tests {
     assert!(title.starts_with("╭─ proc 3 ─ / filter ─ s sort ─"), "{title}");
     let header = proc_row(&buf, 1);
     assert!(header.starts_with("│   PID NAME "), "{header}");
-    assert!(header.ends_with(" CPU% ↓    MEM   POWER   GPU% │"), "{header}");
+    assert!(header.ends_with(" CPU% ↓    MEM   POWER   GPU%   DOWN     UP │"), "{header}");
 
     // sorted by CPU, descending; numbers right-aligned, a dash for a missing power reading
     let words = |y| proc_row(&buf, y).split_whitespace().map(str::to_string).collect::<Vec<_>>();
-    assert_eq!(
-      words(2),
-      ["│", "631", "WindowServer", "vlad", "25.0", "300M", "1.50W", "40.0", "│"]
-    );
-    assert_eq!(words(3), ["│", "2301", "Safari", "vlad", "12.0", "1.5G", "0.80W", "5.0", "│"]);
-    assert_eq!(words(4), ["│", "1", "launchd", "root", "0.0", "20M", "-", "0.0", "│"]);
-    assert!(proc_row(&buf, 2).ends_with("  25.0   300M   1.50W   40.0 │"), "{}", proc_row(&buf, 2));
+    let server =
+      ["│", "631", "WindowServer", "vlad", "25.0", "300M", "1.50W", "40.0", "0", "0", "│"];
+    assert_eq!(words(2), server);
+    let safari =
+      ["│", "2301", "Safari", "vlad", "12.0", "1.5G", "0.80W", "5.0", "2.4M", "51.0K", "│"];
+    assert_eq!(words(3), safari);
+    assert_eq!(words(4), ["│", "1", "launchd", "root", "0.0", "20M", "-", "0.0", "0", "0", "│"]);
+    let end = "  25.0   300M   1.50W   40.0      0      0 │";
+    assert!(proc_row(&buf, 2).ends_with(end), "{}", proc_row(&buf, 2));
 
     // load values on the gradient
     let cpu = x_of(&proc_row(&buf, 2), "25.0");
     assert_eq!(buf[(cpu, PROC_Y + 2)].fg, gradient(0.25));
+    // network rates in the colors of the network box
+    let line = proc_row(&buf, 3);
+    assert_eq!(buf[(x_of(&line, "2.4M"), PROC_Y + 3)].fg, theme::NET_RX);
+    assert_eq!(buf[(x_of(&line, "51.0K"), PROC_Y + 3)].fg, theme::NET_TX);
   }
 
   #[test]

@@ -45,6 +45,10 @@ pub enum ProcSort {
   Mem,
   Power,
   Gpu,
+  /// Network download.
+  Down,
+  /// Network upload.
+  Up,
   Pid,
   Name,
   User,

@@ -1,8 +1,8 @@
-//! Per-process resource usage (CPU, memory, energy).
+//! Per-process resource usage (CPU, memory, energy, network).
 //!
 //! libproc reads the current user's processes. Other users' processes come from `/bin/ps`, which
 //! has CPU time and RSS but no energy counter. GPU time of every process comes from the GPU's user
-//! clients in the IORegistry.
+//! clients in the IORegistry, network traffic of every process from `/usr/bin/nettop`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -15,6 +15,7 @@ use core_foundation::base::{CFAllocatorRef, CFType, CFTypeRef, TCFType, kCFAlloc
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
 use core_foundation::number::CFNumber;
 use core_foundation::string::{CFString, CFStringRef};
+use macmon::NetMetrics;
 
 const RUSAGE_INFO_V4: c_int = 4;
 const RUSAGE_INFO_V6: c_int = 6;
@@ -127,6 +128,8 @@ pub struct ProcInfo {
   pub power_w: Option<f32>,
   /// Share of the interval the GPU spent on the process, 0..=100.
   pub gpu_pct: f32,
+  /// Network traffic over the interval, without loopback; `None` when `nettop` couldn't run.
+  pub net: Option<NetMetrics>,
 }
 
 /// Cumulative counters of one process; rates come from two snapshots.
@@ -545,6 +548,100 @@ fn gpu_times() -> HashMap<i32, u64> {
   read_gpu_clients().map(sum_gpu_times).unwrap_or_default()
 }
 
+// MARK: Network
+
+/// `nettop` arguments: one sample (`-L 1`) of every connection of every process as CSV, raw byte
+/// counts (`-x`), addresses without name lookups (`-n`), only traffic that leaves the machine
+/// (`-t external`: no loopback, so a local client of a local server doesn't count).
+const NETTOP_ARGS: [&str; 8] =
+  ["-L", "1", "-x", "-n", "-t", "external", "-J", "bytes_in,bytes_out"];
+
+/// Byte counters of one connection: `(pid, connection, bytes in, bytes out)`.
+type Flow = (i32, String, u64, u64);
+
+/// Connections in `nettop` output: a `name.pid,in,out,` line per process, then a line per
+/// connection (`tcp4 192.168.1.2:52152<->17.57.147.7:5223,in,out,`) of that process. Names may hold
+/// dots, spaces and commas, so lines are read from the end.
+fn parse_nettop(out: &str) -> Vec<Flow> {
+  let mut flows = vec![];
+  let mut pid = None;
+  for line in out.lines() {
+    let mut fields = line.trim_end().trim_end_matches(',').rsplitn(3, ',');
+    let (Some(bytes_out), Some(bytes_in), Some(label)) =
+      (fields.next(), fields.next(), fields.next())
+    else {
+      continue;
+    };
+    let (Some(bytes_in), Some(bytes_out)) = (digits(bytes_in), digits(bytes_out)) else {
+      continue; // the header
+    };
+
+    if label.contains("<->") {
+      if let Some(pid) = pid {
+        flows.push((pid, label.to_string(), bytes_in, bytes_out));
+      }
+    } else {
+      pid = label.rsplit_once('.').and_then(|(_, pid)| pid.parse().ok());
+    }
+  }
+  flows
+}
+
+/// Connections of every process, `None` when `nettop` can't run. `nettop` reads the private
+/// NetworkStatistics framework with the `com.apple.private.network.statistics` entitlement; macmon
+/// can't hold that entitlement, and without it the framework reports only the current user's
+/// processes (checked on macOS 26.6), so the setuid-free way to see every process is `nettop`'s
+/// output, as `ps` is for CPU time.
+fn run_nettop() -> Option<Vec<Flow>> {
+  let out = Command::new("/usr/bin/nettop")
+    .args(NETTOP_ARGS)
+    .stdin(Stdio::null())
+    .stderr(Stdio::null())
+    .output()
+    .ok()?;
+  out.status.success().then(|| parse_nettop(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Bytes in and out of each connection at the previous sample. `nettop`'s per-process totals cover
+/// only open connections and drop when one closes, so traffic is summed per connection instead.
+#[derive(Default)]
+struct NetTracker {
+  /// `None` before the first sample.
+  prev: Option<HashMap<(i32, String), (u64, u64)>>,
+}
+
+impl NetTracker {
+  /// Bytes in and out per pid since the previous call: the growth of each connection, all of a
+  /// new one (or one whose counters went down: its address pair was reused). Empty on the first
+  /// call, where every connection only sets the baseline. A connection opened and closed between
+  /// two calls is missed.
+  fn update(&mut self, flows: Vec<Flow>) -> HashMap<i32, (u64, u64)> {
+    let mut bytes: HashMap<i32, (u64, u64)> = HashMap::new();
+    let mut seen = HashMap::with_capacity(flows.len());
+    for (pid, flow, bytes_in, bytes_out) in flows {
+      if let Some(prev) = &self.prev {
+        let (prev_in, prev_out) = match prev.get(&(pid, flow.clone())) {
+          Some(&(prev_in, prev_out)) if bytes_in >= prev_in && bytes_out >= prev_out => {
+            (prev_in, prev_out)
+          }
+          _ => (0, 0),
+        };
+        let total = bytes.entry(pid).or_default();
+        total.0 = total.0.saturating_add(bytes_in - prev_in);
+        total.1 = total.1.saturating_add(bytes_out - prev_out);
+      }
+      seen.insert((pid, flow), (bytes_in, bytes_out));
+    }
+    self.prev = Some(seen);
+    bytes
+  }
+}
+
+/// `bytes` over `elapsed_ns` as bytes per second; 0 for no time.
+fn bytes_per_sec(bytes: u64, elapsed_ns: u64) -> u64 {
+  if elapsed_ns == 0 { 0 } else { (bytes as u128 * 1_000_000_000 / u128::from(elapsed_ns)) as u64 }
+}
+
 // MARK: Sampler
 
 /// CPU % of a `ps` row from its CPU time `cpu_ns` at `now_ns` and its earlier `(time, CPU time)`
@@ -583,6 +680,7 @@ pub struct ProcSampler {
   last: Option<Instant>,
   /// Time since the first sample, in ns.
   clock_ns: u64,
+  net: NetTracker,
 }
 
 impl ProcSampler {
@@ -606,15 +704,19 @@ impl ProcSampler {
       users: HashMap::new(),
       last: None,
       clock_ns: 0,
+      net: NetTracker::default(),
     }
   }
 
-  /// CPU and power are rates since the previous call; the first call reports them as zero.
+  /// CPU, power and network are rates since the previous call; the first call reports them as
+  /// zero.
   pub fn sample(&mut self) -> Vec<ProcInfo> {
     let now = Instant::now();
     let elapsed_ns = self.last.map_or(0, |last| now.duration_since(last).as_nanos() as u64);
     self.last = Some(now);
-    let gpu = gpu_times(); // Read next to `now`: the counters carry no timestamp of their own.
+    // read next to `now`: the counters carry no timestamp of their own
+    let gpu = gpu_times();
+    let net = run_nettop().map(|flows| self.net.update(flows));
 
     list_pids(&mut self.pids);
     let mut rows = Vec::with_capacity(self.pids.len());
@@ -635,7 +737,17 @@ impl ProcSampler {
       // exec (about 1 ms for 800 processes)
       raw.path = exe_path(raw.pid);
     }
-    self.update(rows, elapsed_ns)
+    let mut procs = self.update(rows, elapsed_ns);
+    for proc in &mut procs {
+      proc.net = net.as_ref().map(|net| {
+        let (bytes_in, bytes_out) = net.get(&proc.pid).copied().unwrap_or_default();
+        NetMetrics {
+          rx_rate: bytes_per_sec(bytes_in, elapsed_ns),
+          tx_rate: bytes_per_sec(bytes_out, elapsed_ns),
+        }
+      });
+    }
+    procs
   }
 
   /// Rates against the previous tick (CPU of `ps` rows over the last `PS_CPU_INTERVALS` ticks);
@@ -679,6 +791,7 @@ impl ProcSampler {
         mem_bytes: raw.mem_bytes,
         power_w: usage.power_w,
         gpu_pct: usage.gpu_pct,
+        net: None,
       });
       let counters = raw.counters;
       known.insert(raw.pid, Known { counters, comm: raw.comm, name, path, cpu_history });
@@ -732,6 +845,60 @@ mod tests {
     assert_eq!(usage(Some(&counters(200 * SEC, Some(0))), &cur, SEC), idle);
     assert_eq!(usage(Some(&counters(0, Some(200 * SEC))), &cur, SEC), idle);
     assert_eq!(usage(Some(&counters(0, Some(0))), &cur, 0), idle);
+  }
+
+  /// `nettop` output: a header, processes with dots, spaces and a comma in their names, and their
+  /// connections.
+  const NETTOP_OUT: &str = "\
+,bytes_in,bytes_out,
+apsd.352,4809305,9401571,
+tcp4 192.168.88.4:52152<->17.57.147.7:5223,4809305,9401571,
+Spotify Helper.39297,12198619,51281,
+quic4 192.168.88.4:56995<->17.248.199.67:443,5811,6728,
+tcp6 [fe80::1]:52153<->[2606:4700::6810]:443,12192808,44553,
+com.apple.WebKi,x.14209,0,0,
+";
+
+  #[test]
+  fn nettop_connections_belong_to_the_process_above_them() {
+    let flows = parse_nettop(NETTOP_OUT);
+    let flow = |pid, label: &str, rx, tx| (pid, label.to_string(), rx, tx);
+    assert_eq!(
+      flows,
+      [
+        flow(352, "tcp4 192.168.88.4:52152<->17.57.147.7:5223", 4809305, 9401571),
+        flow(39297, "quic4 192.168.88.4:56995<->17.248.199.67:443", 5811, 6728),
+        flow(39297, "tcp6 [fe80::1]:52153<->[2606:4700::6810]:443", 12192808, 44553),
+      ]
+    );
+    // connections before any process line have no owner
+    assert!(parse_nettop("tcp4 a:1<->b:2,10,20,\n").is_empty());
+  }
+
+  #[test]
+  fn net_bytes_add_up_per_connection() {
+    let flow = |pid, label: &str, rx, tx| (pid, label.to_string(), rx, tx);
+    let mut net = NetTracker::default();
+    // the first sample only sets the baseline
+    let first = vec![flow(1, "a", 1000, 100), flow(1, "b", 500, 50), flow(2, "c", 70, 7)];
+    assert!(net.update(first).is_empty());
+
+    // a grows by 300 / 30; b closed (its bytes go with it, no drop below zero); d is new and
+    // counts in full; c's address pair was reused by a new connection, which counts in full
+    let second = vec![flow(1, "a", 1300, 130), flow(1, "d", 40, 4), flow(2, "c", 20, 2)];
+    let bytes = net.update(second);
+    assert_eq!(bytes, HashMap::from([(1, (340, 34)), (2, (20, 2))]));
+
+    // nothing new: zero for the processes still connected
+    let third = vec![flow(1, "a", 1300, 130)];
+    assert_eq!(net.update(third), HashMap::from([(1, (0, 0))]));
+  }
+
+  #[test]
+  fn net_rates_are_per_second() {
+    assert_eq!(bytes_per_sec(5_000_000, 5 * SEC), 1_000_000);
+    assert_eq!(bytes_per_sec(1000, 3 * SEC), 333);
+    assert_eq!(bytes_per_sec(1000, 0), 0);
   }
 
   #[test]

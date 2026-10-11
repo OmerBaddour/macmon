@@ -48,7 +48,7 @@ const NET_MIN_SCALE: u64 = 1_000_000;
 /// `bytes_per_sec` in decimal units, as Activity Monitor shows network rates, with 3 significant
 /// digits at most: `512 B/s`, `1.5 KB/s`, `12.3 MB/s`, `123 MB/s`. `short` gives `512B`, `1.5K`,
 /// `12.3M`.
-fn rate(bytes_per_sec: u64, short: bool) -> String {
+pub(super) fn rate(bytes_per_sec: u64, short: bool) -> String {
   let units = ["B", "K", "M", "G", "T"];
   let mut value = bytes_per_sec as f64;
   let mut unit = 0;

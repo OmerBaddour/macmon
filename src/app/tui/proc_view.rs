@@ -13,7 +13,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::App;
-use super::boxes::{Titles, draw_box, hint, render_bottom_border, title_text_room};
+use super::boxes::{Titles, draw_box, hint, rate, render_bottom_border, title_text_room};
 use super::store::ratio;
 use super::theme::{self, dim, gradient, heading, text};
 use crate::config::{Config, ProcSort};
@@ -38,7 +38,7 @@ const WHEEL_ROWS: usize = 3;
 
 /// Columns of the process table in display order: one per sort key, so each header sorts by its
 /// own column.
-const COLUMNS: [ProcSort; 7] = [
+const COLUMNS: [ProcSort; 9] = [
   ProcSort::Pid,
   ProcSort::Name,
   ProcSort::User,
@@ -46,13 +46,17 @@ const COLUMNS: [ProcSort; 7] = [
   ProcSort::Mem,
   ProcSort::Power,
   ProcSort::Gpu,
+  ProcSort::Down,
+  ProcSort::Up,
 ];
 
 /// Columns dropped (in this order) when the table is too narrow, each while NAME would get fewer
 /// cells than the given width; PID, NAME and the sorted column always stay.
-const DROP_ORDER: [(ProcSort, u16); 5] = [
+const DROP_ORDER: [(ProcSort, u16); 7] = [
   (ProcSort::User, NAME_USER_WIDTH),
+  (ProcSort::Up, NAME_MIN_WIDTH),
   (ProcSort::Power, NAME_MIN_WIDTH),
+  (ProcSort::Down, NAME_MIN_WIDTH),
   (ProcSort::Gpu, NAME_MIN_WIDTH),
   (ProcSort::Mem, NAME_MIN_WIDTH),
   (ProcSort::Cpu, NAME_MIN_WIDTH),
@@ -69,6 +73,8 @@ impl ProcSort {
       Self::Mem => "MEM",
       Self::Power => "POWER",
       Self::Gpu => "GPU%",
+      Self::Down => "DOWN",
+      Self::Up => "UP",
     }
   }
 
@@ -83,6 +89,8 @@ impl ProcSort {
       Self::Mem => 6,
       Self::Power => 7,
       Self::Gpu => 6,
+      Self::Down => 6,
+      Self::Up => 6,
     }
   }
 
@@ -96,13 +104,15 @@ impl ProcSort {
     !matches!(self, Self::Pid | Self::Name | Self::User)
   }
 
-  /// Next column in the `s` cycle: CPU → MEM → POWER → GPU → PID → NAME → USER → CPU.
+  /// Next column in the `s` cycle: CPU → MEM → POWER → GPU → DOWN → UP → PID → NAME → USER → CPU.
   fn next(self) -> Self {
     match self {
       Self::Cpu => Self::Mem,
       Self::Mem => Self::Power,
       Self::Power => Self::Gpu,
-      Self::Gpu => Self::Pid,
+      Self::Gpu => Self::Down,
+      Self::Down => Self::Up,
+      Self::Up => Self::Pid,
       Self::Pid => Self::Name,
       Self::Name => Self::User,
       Self::User => Self::Cpu,
@@ -171,22 +181,29 @@ fn compare(a: &ProcInfo, b: &ProcInfo, sort: ProcSort) -> Ordering {
   fn lower(text: &str) -> impl Iterator<Item = char> + '_ {
     text.chars().flat_map(char::to_lowercase)
   }
+  let net = |p: &ProcInfo| p.net.unwrap_or_default();
 
   match sort {
     ProcSort::Cpu => a.cpu_pct.total_cmp(&b.cpu_pct),
     ProcSort::Mem => a.mem_bytes.cmp(&b.mem_bytes),
     ProcSort::Power => a.power_w.unwrap_or(0.0).total_cmp(&b.power_w.unwrap_or(0.0)),
     ProcSort::Gpu => a.gpu_pct.total_cmp(&b.gpu_pct),
+    ProcSort::Down => net(a).rx_rate.cmp(&net(b).rx_rate),
+    ProcSort::Up => net(a).tx_rate.cmp(&net(b).tx_rate),
     ProcSort::Pid => a.pid.cmp(&b.pid),
     ProcSort::Name => lower(&a.name).cmp(lower(&b.name)),
     ProcSort::User => lower(&a.user).cmp(lower(&b.user)),
   }
 }
 
-/// Sorts by `sort` in the given direction. Processes without a power reading go last when sorted
-/// by power, ties are ordered by pid.
+/// Sorts by `sort` in the given direction. Processes without a reading go last when sorted by power
+/// or network, ties are ordered by pid.
 fn sort_procs(procs: &mut [ProcInfo], sort: ProcSort, desc: bool) {
-  let missing = |p: &ProcInfo| sort == ProcSort::Power && p.power_w.is_none();
+  let missing = |p: &ProcInfo| match sort {
+    ProcSort::Power => p.power_w.is_none(),
+    ProcSort::Down | ProcSort::Up => p.net.is_none(),
+    _ => false,
+  };
   procs.sort_by(|a, b| {
     let ord = compare(a, b, sort);
     let ord = if desc { ord.reverse() } else { ord };
@@ -713,8 +730,8 @@ impl App {
     (column_areas(header_row, &columns), body)
   }
 
-  /// Text of one table cell. Load values are colored by the gradient, zeros are dim and missing
-  /// values show as a dim `-`.
+  /// Text of one table cell. Load values are colored by the gradient, network rates in the colors
+  /// of the network box (`46.8M`), zeros are dim and missing values show as a dim `-`.
   fn proc_cell(&self, column: ProcSort, proc: &ProcInfo) -> Span<'static> {
     let load = |value: f64, ratio: f64, text: String| {
       if value > 0.0 { Span::styled(text, gradient(ratio)) } else { dim(text) }
@@ -742,6 +759,14 @@ impl App {
       ProcSort::Gpu => {
         let gpu = f64::from(proc.gpu_pct);
         load(gpu, gpu / 100.0, format!("{gpu:.1}"))
+      }
+      ProcSort::Down | ProcSort::Up => {
+        let Some(net) = proc.net else { return dim("-") };
+        let (bytes, color) = match column {
+          ProcSort::Down => (net.rx_rate, theme::NET_RX),
+          _ => (net.tx_rate, theme::NET_TX),
+        };
+        if bytes == 0 { dim("0") } else { Span::styled(rate(bytes, true), color) }
       }
     }
   }
@@ -786,6 +811,7 @@ fn draw_row<'a>(
 
 #[cfg(test)]
 mod tests {
+  use macmon::NetMetrics;
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::layout::Rect;
 
@@ -805,16 +831,22 @@ mod tests {
       mem_bytes: mem_mb * MIB,
       power_w: power,
       gpu_pct: gpu,
+      net: None,
     }
   }
 
   fn sample() -> Vec<ProcInfo> {
+    // network (download, upload) in bytes per second; launchd's unknown
+    let net = |mut proc: ProcInfo, rx_rate, tx_rate| {
+      proc.net = Some(NetMetrics { rx_rate, tx_rate });
+      proc
+    };
     vec![
       proc(1, "launchd", 0.5, 20, None, 0.0),
-      proc(631, "WindowServer", 25.0, 300, Some(1.5), 40.0),
-      proc(2301, "Safari", 12.0, 900, Some(0.8), 5.0),
-      proc(4410, "cargo", 80.0, 150, Some(3.2), 0.0),
-      proc(77, "safaribookmarksyncagent", 0.0, 10, Some(0.0), 0.0),
+      net(proc(631, "WindowServer", 25.0, 300, Some(1.5), 40.0), 5000, 100),
+      net(proc(2301, "Safari", 12.0, 900, Some(0.8), 5.0), 900_000, 20_000),
+      net(proc(4410, "cargo", 80.0, 150, Some(3.2), 0.0), 0, 0),
+      net(proc(77, "safaribookmarksyncagent", 0.0, 10, Some(0.0), 0.0), 5000, 300),
     ]
   }
 
@@ -847,6 +879,9 @@ mod tests {
       (ProcSort::Power, [4410, 631, 2301, 77, 1], [77, 2301, 631, 4410, 1]),
       // ties by pid
       (ProcSort::Gpu, [631, 2301, 1, 77, 4410], [1, 77, 4410, 2301, 631]),
+      // no network reading goes last in both directions, ties by pid
+      (ProcSort::Down, [2301, 77, 631, 4410, 1], [4410, 77, 631, 2301, 1]),
+      (ProcSort::Up, [2301, 77, 631, 4410, 1], [4410, 631, 77, 2301, 1]),
       (ProcSort::Pid, [4410, 2301, 631, 77, 1], [1, 77, 631, 2301, 4410]),
       // case-insensitive
       (ProcSort::Name, [631, 77, 2301, 1, 4410], [4410, 1, 2301, 77, 631]),
@@ -870,7 +905,7 @@ mod tests {
     // PIDs and text from the start
     let mut view = view();
     let mut sorts = vec![];
-    for _ in 0..7 {
+    for _ in 0..9 {
       assert!(press(&mut view, KeyCode::Char('s')));
       sorts.push((view.sort, view.sort_desc));
     }
@@ -878,6 +913,8 @@ mod tests {
       (Mem, true),
       (Power, true),
       (Gpu, true),
+      (Down, true),
+      (Up, true),
       (Pid, false),
       (Name, false),
       (User, false),
@@ -892,7 +929,7 @@ mod tests {
     assert!(view.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::SHIFT)));
     assert_eq!((view.sort, view.sort_desc), (Cpu, true));
 
-    // [PID, NAME, CPU%, MEM, GPU%] on screen: USER and POWER are left out
+    // [PID, NAME, CPU%, MEM, GPU%] on screen: USER, UP, POWER and DOWN are left out
     view.targets.headers = column_areas(Rect::new(2, 1, 36, 1), &fit_columns(36, Cpu));
     let mut sorts = vec![];
     for _ in 0..5 {
@@ -1033,12 +1070,24 @@ mod tests {
       |width, sort| fit_columns(width, sort).into_iter().map(|(c, _)| c).collect::<Vec<ProcSort>>();
 
     // NAME takes the room the others leave
-    let all = [(Pid, 5), (Name, 154), (User, 10), (Cpu, 6), (Mem, 6), (Power, 7), (Gpu, 6)];
+    let all = [
+      (Pid, 5),
+      (Name, 140),
+      (User, 10),
+      (Cpu, 6),
+      (Mem, 6),
+      (Power, 7),
+      (Gpu, 6),
+      (Down, 6),
+      (Up, 6),
+    ];
     assert_eq!(fit_columns(200, Pid), all);
     // USER goes before NAME gets fewer than 16 cells, the others before it gets fewer than 8
-    assert_eq!(names(62, Pid), [Pid, Name, User, Cpu, Mem, Power, Gpu]);
-    assert_eq!(names(61, Pid), [Pid, Name, Cpu, Mem, Power, Gpu]);
-    assert_eq!(names(42, Pid), [Pid, Name, Cpu, Mem, Gpu]);
+    assert_eq!(names(76, Pid), [Pid, Name, User, Cpu, Mem, Power, Gpu, Down, Up]);
+    assert_eq!(names(75, Pid), [Pid, Name, Cpu, Mem, Power, Gpu, Down, Up]);
+    assert_eq!(names(56, Pid), [Pid, Name, Cpu, Mem, Power, Gpu, Down]);
+    assert_eq!(names(49, Pid), [Pid, Name, Cpu, Mem, Gpu, Down]);
+    assert_eq!(names(41, Pid), [Pid, Name, Cpu, Mem, Gpu]);
     assert_eq!(names(34, Pid), [Pid, Name, Cpu, Mem]);
     assert_eq!(names(27, Pid), [Pid, Name, Cpu]);
     assert_eq!(names(20, Pid), [Pid, Name]);
