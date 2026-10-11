@@ -131,6 +131,8 @@ unsafe extern "C" {
   fn IORegistryEntryGetName(entry: u32, name: *mut i8) -> i32;
   fn IORegistryEntryGetRegistryEntryID(entry: u32, id: *mut u64) -> i32;
   fn IORegistryEntryCreateCFProperties(entry: u32, properties: *mut CFMutableDictionaryRef, allocator: CFAllocatorRef, options: u32) -> i32;
+  fn IORegistryEntryCreateCFProperty(entry: u32, key: CFStringRef, allocator: CFAllocatorRef, options: u32) -> CFTypeRef;
+  fn IORegistryEntryGetParentEntry(entry: u32, plane: *const i8, parent: *mut u32) -> i32;
   fn IOObjectRelease(obj: u32) -> u32;
 }
 
@@ -579,6 +581,78 @@ fn if_mib_data(index: u16) -> Option<NetInterface> {
 pub fn net_bytes() -> WithError<(u64, u64)> {
   let counted = sysctl_net_interfaces()?.into_iter().filter(NetInterface::counted);
   Ok(counted.fold((0, 0), |(rx, tx), i| (rx + i.rx_bytes, tx + i.tx_bytes)))
+}
+
+// MARK: Disk
+
+/// Byte counters of one disk (an `IOBlockStorageDriver`) since it attached.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DiskDriver {
+  /// Whether the disk is a disk image, backed by a file on another disk.
+  pub disk_image: bool,
+  /// Bytes read.
+  pub read_bytes: u64,
+  /// Bytes written.
+  pub write_bytes: u64,
+}
+
+/// Byte counters of the disks, rootless: the `Statistics` of each `IOBlockStorageDriver` in the
+/// IORegistry, as `iostat` reads them. Disks without statistics are skipped.
+pub fn iokit_disk_drivers() -> WithError<Vec<DiskDriver>> {
+  let mut disks = vec![];
+  for (entry, _) in IOServiceIterator::new("IOBlockStorageDriver")? {
+    disks.extend(disk_driver(entry));
+    unsafe { IOObjectRelease(entry) };
+  }
+  Ok(disks)
+}
+
+/// Counters of the storage driver `entry`, or None when it has no statistics.
+fn disk_driver(entry: u32) -> Option<DiskDriver> {
+  let stats = io_property(entry, "Statistics").filter(|x| x.instance_of::<CFDictionary>())?;
+  let stats = stats.as_CFTypeRef() as CFDictionaryRef;
+  let bytes = |key| cfnum_get_i64(stats, key).and_then(|x| u64::try_from(x).ok());
+  Some(DiskDriver {
+    disk_image: is_disk_image(entry),
+    read_bytes: bytes("Bytes (Read)")?,
+    write_bytes: bytes("Bytes (Write)")?,
+  })
+}
+
+/// Whether the storage driver `entry` drives a disk image: its device (the parent) has its
+/// physical interconnect in a file.
+fn is_disk_image(entry: u32) -> bool {
+  let mut device = 0;
+  if unsafe { IORegistryEntryGetParentEntry(entry, c"IOService".as_ptr(), &mut device) } != 0 {
+    return false;
+  }
+  let protocol = io_property(device, "Protocol Characteristics");
+  unsafe { IOObjectRelease(device) };
+
+  let Some(protocol) = protocol.filter(|x| x.instance_of::<CFDictionary>()) else { return false };
+  let protocol = protocol.as_CFTypeRef() as CFDictionaryRef;
+  let Some(location) = cfdict_get_val(protocol, "Physical Interconnect Location") else {
+    return false;
+  };
+  let location = unsafe { CFType::wrap_under_get_rule(location) };
+  location.downcast::<CFString>().is_some_and(|x| x == "File")
+}
+
+/// Copy the property `key` of the IORegistry entry `entry`.
+fn io_property(entry: u32, key: &str) -> Option<CFType> {
+  let key = CFString::new(key);
+  let val = unsafe {
+    IORegistryEntryCreateCFProperty(entry, key.as_concrete_TypeRef(), kCFAllocatorDefault, 0)
+  };
+  (!val.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(val) })
+}
+
+/// Bytes read from and written to the disks since they attached, without disk images: their
+/// reads and writes reach the disk holding the image file too, and would count twice. A disk that
+/// detaches takes its bytes along, so the totals can drop between calls.
+pub fn disk_bytes() -> WithError<(u64, u64)> {
+  let counted = iokit_disk_drivers()?.into_iter().filter(|x| !x.disk_image);
+  Ok(counted.fold((0, 0), |(read, write), x| (read + x.read_bytes, write + x.write_bytes)))
 }
 
 // MARK: SockInfo

@@ -10,8 +10,8 @@ use crate::shared::{
   ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, zero_div,
 };
 use crate::sources::{
-  IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, get_soc_info, libc_ram,
-  libc_ram_breakdown, libc_swap, net_bytes, sysctl_mem_pressure,
+  IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, disk_bytes, get_soc_info,
+  libc_ram, libc_ram_breakdown, libc_swap, net_bytes, sysctl_mem_pressure,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -149,6 +149,16 @@ pub struct NetMetrics {
   pub tx_rate: u64,
 }
 
+/// Disk throughput over all disks but disk images, which would count the same bytes twice (see
+/// [`crate::sources::disk_bytes`]).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DiskMetrics {
+  /// Bytes read over the sampling interval, per second.
+  pub read_rate: u64,
+  /// Bytes written over the sampling interval, per second.
+  pub write_rate: u64,
+}
+
 /// Fan speed metrics.
 #[derive(Debug, Default, Serialize)]
 pub struct FanMetric {
@@ -207,6 +217,8 @@ pub struct Metrics {
   pub memory: MemMetrics,
   /// Network throughput.
   pub network: NetMetrics,
+  /// Disk throughput.
+  pub disk: DiskMetrics,
   /// Fan metrics ordered by stable SMC fan key order.
   pub fans: Vec<FanMetric>,
   /// Combined frequency-weighted active residency across all CPU cores.
@@ -484,6 +496,8 @@ pub struct Sampler {
   prev_swapped: Option<(u64, u64)>,
   /// Bytes received and sent since boot at the previous sample, for the network rates.
   prev_net: Option<(u64, u64)>,
+  /// Bytes read and written since the disks attached at the previous sample, for the disk rates.
+  prev_disk: Option<(u64, u64)>,
 }
 
 impl Sampler {
@@ -505,6 +519,7 @@ impl Sampler {
       smc_fan_keys: smc_sensors.fan_keys,
       prev_swapped: None,
       prev_net: None,
+      prev_disk: None,
     })
   }
 
@@ -615,6 +630,14 @@ impl Sampler {
     let Ok(bytes) = net_bytes() else { return NetMetrics::default() };
     let (rx_rate, tx_rate) = rates(&mut self.prev_net, bytes, elapsed);
     NetMetrics { rx_rate, tx_rate }
+  }
+
+  /// Disk rates over `elapsed` since the previous call: zero on the first, and when the counters
+  /// can't be read.
+  fn get_disk(&mut self, elapsed: Duration) -> DiskMetrics {
+    let Ok(bytes) = disk_bytes() else { return DiskMetrics::default() };
+    let (read_rate, write_rate) = rates(&mut self.prev_disk, bytes, elapsed);
+    DiskMetrics { read_rate, write_rate }
   }
 
   fn get_sys_power(&mut self) -> WithError<f32> {
@@ -733,6 +756,7 @@ impl Sampler {
 
     rs.memory = self.get_mem(elapsed)?;
     rs.network = self.get_net(elapsed);
+    rs.disk = self.get_disk(elapsed);
     rs.temp = self.get_temp()?;
     rs.fans = self.get_fans();
 

@@ -25,7 +25,7 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::{ExecutableCommand, cursor, terminal};
 use ratatui::prelude::*;
 use store::{
-  CpuClusters, FanStore, FreqSample, FreqStore, LoadStore, MemoryStore, NetStore, PowerStore,
+  CpuClusters, FanStore, FreqSample, FreqStore, LoadStore, MemoryStore, PowerStore, RateStore,
   TempStore,
 };
 
@@ -280,7 +280,8 @@ pub struct App {
 
   soc: SocInfo,
   mem: MemoryStore,
-  net: NetStore,
+  net: RateStore,
+  disk: RateStore,
 
   cpu_power: PowerStore,
   gpu_power: PowerStore,
@@ -338,7 +339,8 @@ impl App {
     self.fans.push(data.fans);
 
     self.mem.push(data.memory);
-    self.net.push(data.network);
+    self.net.push(data.network.rx_rate, data.network.tx_rate);
+    self.disk.push(data.disk.read_rate, data.disk.write_rate);
   }
 
   fn procs_visible(&self) -> bool {
@@ -528,7 +530,9 @@ mod tests {
   use std::sync::{Arc, Mutex, RwLock, mpsc};
   use std::time::Duration;
 
-  use macmon::{FanMetric, MemMetrics, MemPressure, Metrics, NetMetrics, SocInfo, TempMetrics};
+  use macmon::{
+    DiskMetrics, FanMetric, MemMetrics, MemPressure, Metrics, NetMetrics, SocInfo, TempMetrics,
+  };
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::{Buffer, CellDiffOption};
@@ -590,6 +594,7 @@ mod tests {
         ..Default::default()
       },
       network: NetMetrics { rx_rate: 12_345_678, tx_rate: 450_000 },
+      disk: DiskMetrics { read_rate: 210_000_000, write_rate: 3_400 },
       fans: vec![FanMetric { name: "fan0".to_string(), rpm: 1200, max_rpm: Some(6000) }],
       ecpu_freq_mhz: 1800,
       ecpu_scaled_ratio: 0.42,
@@ -1057,7 +1062,7 @@ mod tests {
   #[test]
   fn renders_every_box_at_any_size() {
     use Metric::*;
-    let every_box = [Cpu, Gpu, Ram, CpuPower, GpuPower, Network];
+    let every_box = [Cpu, Gpu, Ram, CpuPower, GpuPower, Disk, Network];
     let sizes = [
       (400, 120),
       (200, 50),
@@ -1104,12 +1109,13 @@ mod tests {
 
   /// Full box titles of `test_metrics`: the original format without the RAM total and without
   /// alignment padding.
-  const TITLES: [&str; 6] = [
+  const TITLES: [&str; 7] = [
     "CPU 60%",
     "GPU 23% @ 1400 MHz",
     "RAM 20.00 GB (55.6%) · SWAP 1.00 / 2.0 GB",
     "CPU 4.50W (4.50, 4.50)",
     "GPU 2.00W (2.00, 2.00)",
+    "DISK R 210 MB/s W 3.4 KB/s",
     "NET ↓ 12.3 MB/s ↑ 450 KB/s",
   ];
 
@@ -1155,6 +1161,37 @@ mod tests {
   }
 
   #[test]
+  fn disk_box_draws_reads_over_writes_in_their_colors() {
+    // an idle sample, then 2 MB/s read and 8 MB/s written
+    let mut app = test_app_with(|m| m.disk = DiskMetrics::default());
+    app.update_metrics(Metrics {
+      disk: DiskMetrics { read_rate: 2_000_000, write_rate: 8_000_000 },
+      ..test_metrics()
+    });
+    let buf = render_buffer(&mut app, 200, 50);
+    let area = box_area(&app, &buf, Metric::Disk);
+    let inner = area.inner(ratatui::layout::Margin::new(1, 1));
+    let upper = inner.height.div_ceil(2);
+    let column = |rows: std::ops::Range<u16>| {
+      let x = inner.right() - 1;
+      rows.filter(|&y| buf[(x, y)].symbol() != " ").map(|y| buf[(x, y)].fg).collect::<Vec<_>>()
+    };
+
+    // writes fill their half (the peak on screen), reads a quarter of theirs
+    let reads = column(inner.y..inner.y + upper);
+    assert!(!reads.is_empty() && reads.len() < usize::from(upper) / 2 + 1, "{reads:?}");
+    assert!(reads.iter().all(|&c| c == theme::DISK_READ));
+    let writes = column(inner.y + upper..inner.bottom());
+    assert_eq!(writes, vec![theme::DISK_WRITE; usize::from(inner.height - upper)]);
+
+    let top = box_top(&app, &buf, Metric::Disk);
+    assert!(top.starts_with("╭─ DISK R 2.0 MB/s W 8.0 MB/s ─"), "{top}");
+    let bottom: String =
+      (area.left()..area.right()).map(|x| buf[(x, area.bottom() - 1)].symbol()).collect();
+    assert!(bottom.starts_with("╰─ peak R 2.0 MB/s W 8.0 MB/s ─"), "{bottom}");
+  }
+
+  #[test]
   fn cpu_box_lists_its_clusters_fastest_first_as_long_as_they_fit() {
     let mut app = test_app();
     // (window width, bottom border of the CPU box)
@@ -1182,10 +1219,11 @@ mod tests {
     let version = format!("─ macmon v{} ─╮", env!("CARGO_PKG_VERSION"));
     let top = row(&buf, 0);
     assert!(top.starts_with("╭─ Apple M3 Pro (6E+6P+18GPU 36GB) ─") && top.ends_with(&version));
-    // whole-degree temperatures right on the CPU / GPU power boxes, none for the network
+    // whole-degree temperatures right on the CPU / GPU power boxes, none for disk and network
     assert!(box_top(&app, &buf, Metric::CpuPower).ends_with("─ 45°C ─╮"));
     assert!(box_top(&app, &buf, Metric::GpuPower).ends_with("─ 40°C ─╮"));
     assert!(box_top(&app, &buf, Metric::Network).ends_with("───╮"));
+    assert!(box_top(&app, &buf, Metric::Disk).ends_with("───╮"));
     // the power summary on the bottom border of the metrics box
     let summary = "╰─ Power 6.60W (6.60, 6.60) | Fan 1200 RPM | Total 12.00W (12.00, 12.00) ─";
     assert!(row(&buf, PROC_Y - 2).starts_with(summary), "{}", row(&buf, PROC_Y - 2));
@@ -1225,8 +1263,8 @@ mod tests {
     for (has_swap, cases) in [(true, &swap[..]), (false, &no_swap[..])] {
       let mut app = ram_app(has_swap);
       for &(width, title) in cases {
-        // the CPU, GPU and RAM boxes `width` cells each, side by side
-        let buf = render_buffer(&mut app, width * 3 + 2, 50);
+        // the RAM box `width` cells wide: half the width inside the metrics box
+        let buf = render_buffer(&mut app, width * 2 + 2, 50);
         let title = if title.is_empty() { String::new() } else { format!("─ {title} ") };
         let dashes = "─".repeat(usize::from(width) - 2 - title.chars().count());
         let top = box_top(&app, &buf, Metric::Ram);
@@ -1268,7 +1306,7 @@ mod tests {
 
     // a RAM box 50 cells wide
     let mut app = pressured_app(Some(MemPressure::Warning));
-    let buf = render_buffer(&mut app, 152, 50);
+    let buf = render_buffer(&mut app, 102, 50);
     let area = box_area(&app, &buf, Metric::Ram);
     let line =
       |y: u16| -> String { (area.left()..area.right()).map(|x| buf[(x, y)].symbol()).collect() };
@@ -1311,7 +1349,7 @@ mod tests {
         memory: MemMetrics { swap_in_rate: 0, swap_out_rate: rate, ..pressured.mem.last },
         ..test_metrics()
       });
-      let buf = render_buffer(&mut app, 152, 50);
+      let buf = render_buffer(&mut app, 102, 50);
       let top: String = (area.left()..area.right()).map(|x| buf[(x, area.y)].symbol()).collect();
       assert!(top.contains(&format!("· {title} ─")), "{top}");
       let x = area.left() + x_of(&top, "91%");
@@ -1335,8 +1373,8 @@ mod tests {
     assert!(bottom.starts_with(&format!("╰─ {legend} ─")), "{bottom}");
     assert!(bottom.ends_with("───╯"), "{bottom}");
 
-    // narrow: whole GB
-    let buf = render_buffer(&mut app, 80, 24);
+    // narrow, 26 cells: whole GB
+    let buf = render_buffer(&mut app, 54, 24);
     let area = box_area(&app, &buf, Metric::Ram);
     let y = area.bottom() - 1;
     let bottom: String = (area.left()..area.right()).map(|x| buf[(x, y)].symbol()).collect();
