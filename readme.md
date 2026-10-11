@@ -2,7 +2,7 @@
 
 A personal fork of [vladkens/macmon](https://github.com/vladkens/macmon), the sudoless performance monitor for Apple Silicon Macs by [vladkens](https://github.com/vladkens). All the hard parts (reading CPU / GPU / ANE power, temperatures and memory through private macOS APIs, the same data `powermetrics` exposes, without root) are theirs; go there for the released tool.
 
-The fork reworks the terminal UI around running local LLMs next to normal work, where the question is whether memory is under pressure and what is using it:
+The fork makes macmon one screen for the three pillars of a computer: processing, I/O and network. CPU, GPU and RAM sit on top, with power under each processor. Below RAM, disk and network sit side by side, so the row reads from data moving within the machine to its traffic with the outside world. The process list breaks it all down per process. It grew out of running local LLMs next to normal work, where the question is whether memory is under pressure and what is using it:
 
 - **Process list on its own interval** (`-I`, `[` / `]`), so it can refresh slower than the graphs.
 - **Memory pressure**, not just “used”: RAM split into wired / app / compressed / cached as Activity Monitor splits it, the history colored by kernel memory pressure, swap activity on the title.
