@@ -358,9 +358,14 @@ impl App {
     }
   }
 
-  /// Applies one event. Returns `Break` when the app should quit. Keys can change the interval,
-  /// which `msec` hands on to the sampling threads.
-  fn handle_event(&mut self, event: Event, msec: &RwLock<u32>) -> ControlFlow<()> {
+  /// Applies one event. Returns `Break` when the app should quit. Keys can change the intervals,
+  /// which `msec` and `proc_msec` hand on to the sampling threads.
+  fn handle_event(
+    &mut self,
+    event: Event,
+    msec: &RwLock<u32>,
+    proc_msec: &RwLock<u32>,
+  ) -> ControlFlow<()> {
     let flow = match event {
       Event::Key(key) => self.handle_key(key),
       Event::Mouse(mouse) => {
@@ -379,6 +384,7 @@ impl App {
     };
 
     *msec.write().unwrap() = self.cfg.interval();
+    *proc_msec.write().unwrap() = self.cfg.proc_interval();
     flow
   }
 
@@ -408,6 +414,10 @@ impl App {
       KeyCode::Char('q') => return ControlFlow::Break(()),
       KeyCode::Char('?') => self.help = Some(0),
       KeyCode::Char('r') => self.cfg.toggle_ratio_mode(),
+      // `[` / `]` step the process list interval: plain keys, since terminals take Ctrl- and
+      // Cmd-`+`/`-` for zoom
+      KeyCode::Char(']') => self.cfg.inc_proc_interval(),
+      KeyCode::Char('[') => self.cfg.dec_proc_interval(),
       KeyCode::Char('+') => self.cfg.inc_interval(),
       KeyCode::Char('=') => self.cfg.inc_interval(), // fallback to press without shift
       KeyCode::Char('-') => self.cfg.dec_interval(),
@@ -472,16 +482,20 @@ impl App {
     }
   }
 
-  pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {
-    // an interval from `-i` is used for this run only, the saved one stays
+  pub fn run_loop(&mut self, interval: Option<u32>, proc_interval: Option<u32>) -> WithError<()> {
+    // intervals from `-i` / `-I` are used for this run only, the saved ones stay
     if let Some(interval) = interval {
       self.cfg.set_run_interval(interval);
     }
+    if let Some(proc_interval) = proc_interval {
+      self.cfg.set_run_proc_interval(proc_interval);
+    }
     let msec = Arc::new(RwLock::new(self.cfg.interval()));
+    let proc_msec = Arc::new(RwLock::new(self.cfg.proc_interval()));
 
     let (tx, rx) = mpsc::channel::<Event>();
     run_sampler_thread(tx.clone(), msec.clone());
-    run_procs_thread(tx.clone(), msec.clone(), self.procs_shown.clone(), proc_sampler);
+    run_procs_thread(tx.clone(), proc_msec.clone(), self.procs_shown.clone(), proc_sampler);
 
     // the guard restores the terminal on every way out of here, `?` included
     let (mut term, _guard) = enter_term()?;
@@ -492,7 +506,7 @@ impl App {
     loop {
       term.draw(|f| self.render(f))?;
       mouse = set_mouse_capture(&mut stdout(), mouse, self.wants_mouse())?;
-      if self.handle_event(rx.recv()?, &msec).is_break() {
+      if self.handle_event(rx.recv()?, &msec, &proc_msec).is_break() {
         break;
       }
     }
@@ -775,6 +789,14 @@ mod tests {
       assert_eq!(saved, (interval, interval.into()), "{c}");
     }
 
+    // `]` / `[` step the process list interval by 500 ms; `interval` is left alone
+    for (c, proc_interval) in [(']', 5500), ('[', 5000), ('[', 4500)] {
+      assert!(app.handle_key(key(c)).is_continue());
+      let saved = (app.cfg.proc_interval(), file.saved()["proc_interval"].clone());
+      assert_eq!(saved, (proc_interval, proc_interval.into()), "{c}");
+      assert_eq!(app.cfg.interval(), 1250, "{c}");
+    }
+
     // v: the load boxes become gauges filled to the load, saved under the released name
     assert!(app.handle_key(key('v')).is_continue());
     assert_eq!(file.saved()["view_type"], "Gauge");
@@ -787,7 +809,7 @@ mod tests {
       assert_eq!(cells, line, "row {y}");
     }
     // the key hints show the settings
-    let hints = " v gauge | r active | -/+ 1250ms ─╯";
+    let hints = " v gauge | r active | -/+ 1250ms | [/] 4500ms ─╯";
     assert!(row(&buf, 49).ends_with(hints), "{}", row(&buf, 49));
 
     assert!(app.handle_key(key('v')).is_continue());
@@ -1193,7 +1215,7 @@ mod tests {
     // the PID and the full path, cut from the left to the room the key hints leave
     assert!(press(&mut app, KeyCode::Down).is_continue());
     assert!(bottom(&mut app, 200).starts_with(&format!("╰─ 631 {WINDOW_SERVER} ─")));
-    let cut = format!("╰─ 631 …{} ─ q quit |", &WINDOW_SERVER[WINDOW_SERVER.len() - 47..]);
+    let cut = format!("╰─ 631 …{} ─ q quit |", &WINDOW_SERVER[WINDOW_SERVER.len() - 34..]);
     assert!(bottom(&mut app, 120).starts_with(&cut), "{}", bottom(&mut app, 120));
 
     // without a readable path: the name
@@ -1221,7 +1243,8 @@ mod tests {
     };
     let (tx, rx) = mpsc::channel();
     let msec = Arc::new(RwLock::new(TUI_MIN_MS));
-    run_procs_thread(tx, msec.clone(), app.procs_shown.clone(), new_sampler);
+    let proc_msec = Arc::new(RwLock::new(TUI_MIN_MS));
+    run_procs_thread(tx, proc_msec.clone(), app.procs_shown.clone(), new_sampler);
 
     let timeout = Duration::from_secs(5);
     // Lets the next sample of the process thread run to its end.
@@ -1232,7 +1255,7 @@ mod tests {
     // Hands the next event of the process thread to the app.
     let take_event = |app: &mut App| {
       let event = rx.recv_timeout(timeout).expect("no process sample");
-      assert!(app.handle_event(event, &msec).is_continue());
+      assert!(app.handle_event(event, &msec, &proc_msec).is_continue());
     };
 
     // the baseline, then a sample that runs while the panel is hidden and shown again

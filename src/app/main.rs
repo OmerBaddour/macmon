@@ -130,6 +130,10 @@ struct Cli {
   /// Update interval in milliseconds
   #[arg(short, long, global = true, default_value_t = 1000)]
   interval: u32,
+
+  /// Process list refresh interval in milliseconds, independent from `--interval`
+  #[arg(short = 'I', long = "proc-interval", default_value_t = 5000)]
+  proc_interval: u32,
 }
 
 fn clock(seconds: u64) -> String {
@@ -307,8 +311,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(ValueSource::CommandLine) => Some(args.interval),
         _ => None,
       };
+      let proc_msec = match matches.value_source("proc-interval") {
+        Some(ValueSource::CommandLine) => Some(args.proc_interval),
+        _ => None,
+      };
 
-      app.run_loop(msec)?;
+      app.run_loop(msec, proc_msec)?;
     }
   }
 
