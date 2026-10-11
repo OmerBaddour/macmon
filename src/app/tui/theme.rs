@@ -24,6 +24,10 @@ pub(super) const RAM_APP: Color = Color::Blue;
 pub(super) const RAM_COMPRESSED: Color = Color::Cyan;
 pub(super) const RAM_CACHED: Color = Color::DarkGray;
 
+/// Network graphs and their arrows: download cyan, upload magenta (ANSI 6, 5).
+pub(super) const NET_RX: Color = Color::Cyan;
+pub(super) const NET_TX: Color = Color::Magenta;
+
 /// Steps of the load gradient: green up to `GREEN_MAX`, yellow up to `YELLOW_MAX`, red above.
 const GREEN_MAX: f64 = 1.0 / 3.0;
 const YELLOW_MAX: f64 = 2.0 / 3.0;

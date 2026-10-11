@@ -495,6 +495,92 @@ pub fn libc_swap() -> WithError<(u64, u64)> {
   Ok((usage, total))
 }
 
+// MARK: Network
+
+/// Interface type of bridges (`IFT_BRIDGE` in `<net/if_types.h>`), missing from libc.
+const IFT_BRIDGE: u8 = 0xd1;
+
+/// Byte counters of one network interface since boot (or since it came up).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NetInterface {
+  /// Interface index, for `if_indextoname`.
+  pub index: u16,
+  /// `IFF_*` flags.
+  pub flags: i32,
+  /// `IFT_*` interface type.
+  pub kind: u8,
+  /// Bytes received.
+  pub rx_bytes: u64,
+  /// Bytes sent.
+  pub tx_bytes: u64,
+}
+
+impl NetInterface {
+  /// Whether the traffic of the interface counts as the machine's own: not loopback (traffic
+  /// that never leaves the machine), and not a tunnel (`utun`, `ipsec`: point-to-point; VPN traffic
+  /// crosses a physical interface too) or a bridge (VMs and Internet Sharing: bridged traffic
+  /// crosses a member interface too), which would count the same bytes twice.
+  pub fn counted(&self) -> bool {
+    let skipped = libc::IFF_LOOPBACK | libc::IFF_POINTOPOINT;
+    self.flags & skipped == 0 && self.kind != IFT_BRIDGE
+  }
+}
+
+/// Byte counters of the network interfaces, rootless. They come from `sysctl IFMIB_IFDATA` (one
+/// interface per call), as `netstat -ib` reads them: the 32-bit counters of `getifaddrs` wrap
+/// every 4 GiB, and macOS hands unprivileged readers of `NET_RT_IFLIST2` its 64-bit counters cut
+/// to 32 bits and rounded to KiB.
+pub fn sysctl_net_interfaces() -> WithError<Vec<NetInterface>> {
+  // the highest interface index; indices of interfaces that are gone are skipped
+  let count = sysctl_u32("net.link.generic.system.ifcount").ok_or("Failed to count interfaces")?;
+  Ok((1..=count).filter_map(|index| u16::try_from(index).ok()).filter_map(if_mib_data).collect())
+}
+
+/// Counters of the interface at `index`, or None when there is none.
+fn if_mib_data(index: u16) -> Option<NetInterface> {
+  let mut mib = [
+    libc::CTL_NET,
+    libc::PF_LINK,
+    libc::NETLINK_GENERIC,
+    libc::IFMIB_IFDATA,
+    index.into(),
+    libc::IFDATA_GENERAL,
+  ];
+  let mut size = size_of::<libc::ifmibdata>();
+  let mut mib_data = MaybeUninit::<libc::ifmibdata>::zeroed();
+  let ret = unsafe {
+    libc::sysctl(
+      mib.as_mut_ptr(),
+      mib.len() as _,
+      mib_data.as_mut_ptr().cast(),
+      &mut size,
+      null_mut(),
+      0,
+    )
+  };
+  if ret != 0 || size != size_of::<libc::ifmibdata>() {
+    return None;
+  }
+
+  let mib_data = unsafe { mib_data.assume_init() };
+  let data = mib_data.ifmd_data;
+  Some(NetInterface {
+    index,
+    // flags fit in the low 16 bits (`IFF_*`)
+    flags: (mib_data.ifmd_flags & 0xffff) as i32,
+    kind: data.ifi_type,
+    rx_bytes: data.ifi_ibytes,
+    tx_bytes: data.ifi_obytes,
+  })
+}
+
+/// Bytes received and sent since boot over the interfaces that count (see `NetInterface::counted`).
+/// An interface that goes down takes its bytes along, so the totals can drop between calls.
+pub fn net_bytes() -> WithError<(u64, u64)> {
+  let counted = sysctl_net_interfaces()?.into_iter().filter(NetInterface::counted);
+  Ok(counted.fold((0, 0), |(rx, tx), i| (rx + i.rx_bytes, tx + i.tx_bytes)))
+}
+
 // MARK: SockInfo
 
 /// Static Apple Silicon system information.
