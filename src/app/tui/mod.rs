@@ -1218,12 +1218,10 @@ mod tests {
       |y: u16| -> String { (area.left()..area.right()).map(|x| buf[(x, y)].symbol()).collect() };
 
     // the pressure right on the top border, in its color; the percentages make room for it. 1.2
-    // MB/s swapped in: `SWAP ↑ ↓` with its numbers yellow
+    // MB/s swapped in: `SWAP ⇅` with its numbers yellow
     let top = line(area.y);
-    assert!(
-      top.starts_with("╭─ RAM 89% · SWAP ↑ ↓ 91% ─") && top.ends_with("─ pressure warning ─╮")
-    );
-    for word in ["warning", "↑", "↓", "91%"] {
+    assert!(top.starts_with("╭─ RAM 89% · SWAP ⇅ 91% ─") && top.ends_with("─ pressure warning ─╮"));
+    for word in ["warning", "⇅", "91%"] {
       let x = area.left() + x_of(&top, word);
       assert_eq!(buf[(x, area.y)].fg, Color::Yellow, "{word}");
     }
@@ -1249,7 +1247,7 @@ mod tests {
 
     // 10 MiB/s swapped out: red; no swapping: plain `SWAP` in the text color, however full
     for (rate, title, color) in
-      [(10 << 20, "SWAP ↑ ↓ 91%", Color::Red), (0, "SWAP 91%", Color::Reset)]
+      [(10 << 20, "SWAP ⇅ 91%", Color::Red), (0, "SWAP 91%", Color::Reset)]
     {
       let pressured = pressured_app(Some(MemPressure::Warning));
       let mut app = pressured_app(Some(MemPressure::Warning));

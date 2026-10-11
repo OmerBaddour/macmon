@@ -464,7 +464,7 @@ impl App {
   /// the chip title, so the title shows what is used: `RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB`,
   /// or the percentages `RAM 70% · SWAP 79%` / `RAM 70% SW 79%` when that doesn't fit (without
   /// swap only the RAM part). Narrower, the swap part drops whole (`RAM 70%`), then the title, so
-  /// no number is ever cut. While the system swaps, the swap part reads `SWAP ↑ ↓` / `SW ↑ ↓` with
+  /// no number is ever cut. While the system swaps, the swap part reads `SWAP ⇅` / `SW ⇅` with
   /// its numbers yellow, red from `SWAP_RED_RATE`, and in the text color otherwise: the amount in
   /// swap stays high long after swapping stops, the traffic is what slows the system down. The
   /// memory pressure goes on the right (`pressure normal`, then just `normal`) as long as it fits
@@ -483,7 +483,7 @@ impl App {
       let swapping =
         (traffic > 0).then(|| gradient(if traffic < SWAP_RED_RATE { 0.5 } else { 1.0 }));
       let mark = |name: &'static str| match swapping {
-        Some(color) => vec![heading(name), Span::styled(" ↑ ↓", color)],
+        Some(color) => vec![heading(name), Span::styled(" ⇅", color)],
         None => vec![heading(name)],
       };
       let full_text = format!(" {used:.2} / {total:.1} GB");

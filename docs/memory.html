@@ -24,8 +24,8 @@
   --comp: #ffa0a0;        /* ANSI 6 cyan: RAM_COMPRESSED */
   --cache: #626262;       /* ANSI 8 bright black: RAM_CACHED */
   --ok: #98fb98;          /* ANSI 2 green: pressure normal */
-  --warn: #f0e68c;        /* ANSI 3 yellow: pressure warning, SWAP ↑ ↓ */
-  --crit: #ff2b2b;        /* ANSI 1 red: pressure critical, SWAP ↑ ↓ from 10 MB/s */
+  --warn: #f0e68c;        /* ANSI 3 yellow: pressure warning, SWAP ⇅ */
+  --crit: #ff2b2b;        /* ANSI 1 red: pressure critical, SWAP ⇅ from 10 MB/s */
   --display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
   --body: "IBM Plex Sans", -apple-system, "Helvetica Neue", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
@@ -191,7 +191,7 @@ ol.rules li::marker { font-family: var(--mono); color: var(--muted); }
       </div>
       <div class="signal">
         <h3>Swap activity</h3>
-        <div class="pills"><span class="dim" style="color:var(--muted)">SWAP</span><span class="warnc">SWAP ↑ ↓</span><span class="critc">SWAP ↑ ↓ ≥10 MB/s</span></div>
+        <div class="pills"><span class="dim" style="color:var(--muted)">SWAP</span><span class="warnc">SWAP ⇅</span><span class="critc">SWAP ⇅ ≥10 MB/s</span></div>
         <p>Swap is app memory written to the SSD. How much sits there says little: data stays in swap for hours after the crunch ends. Swapping right now is what makes apps stutter, so macmon colors the SWAP figure only while data is moving.</p>
       </div>
     </div>
@@ -220,12 +220,12 @@ ol.rules li::marker { font-family: var(--mono); color: var(--muted); }
         <span class="src">This Mac, 11 Oct 2026, during the long opencode + Qwen session</span>
         <div class="term">
           <div class="tbox">
-            <div class="ttitle"><span><b>RAM</b> <span class="critc">91%</span> <span class="dim">·</span> <b>SWAP</b> <span class="warnc">↑ ↓</span> <span class="warnc">94%</span></span><span><span class="dim">pressure</span> <span class="warnc">warning</span></span></div>
+            <div class="ttitle"><span><b>RAM</b> <span class="critc">91%</span> <span class="dim">·</span> <b>SWAP</b> <span class="warnc">⇅</span> <span class="warnc">94%</span></span><span><span class="dim">pressure</span> <span class="warnc">warning</span></span></div>
             <div class="bar"><span class="w" style="width:59%"></span><span class="a" style="width:10.6%"></span><span class="c" style="width:21.4%"></span><span class="k" style="width:5.6%"></span></div>
             <div class="tfoot"><span class="lg"><i><span class="cw">■</span>37.8</i><i><span class="ca">■</span>6.8</i><i><span class="cc">■</span>13.7</i><i><span class="ck">■</span>3.6</i></span></div>
           </div>
         </div>
-        <p class="verdict"><b>Struggling.</b> The model pinned 38&nbsp;GB as wired, which can't be reclaimed. Everything else is squeezed into the rest: 14&nbsp;GB of compressor holding 30&nbsp;GB of data, almost no cache left, and swap nearly full. Unloading the model, or using a smaller context, is the fix. The memory figures are real readings from that moment. Pressure and swap activity weren't recorded then, so the warning and <code>↑ ↓</code> shown here are an estimate.</p>
+        <p class="verdict"><b>Struggling.</b> The model pinned 38&nbsp;GB as wired, which can't be reclaimed. Everything else is squeezed into the rest: 14&nbsp;GB of compressor holding 30&nbsp;GB of data, almost no cache left, and swap nearly full. Unloading the model, or using a smaller context, is the fix. The memory figures are real readings from that moment. Pressure and swap activity weren't recorded then, so the warning and <code>⇅</code> shown here are an estimate.</p>
       </div>
 
       <div class="case">
@@ -270,7 +270,7 @@ ol.rules li::marker { font-family: var(--mono); color: var(--muted); }
       <li>Grey is free memory waiting to be useful. A bar full of grey is a healthy Mac.</li>
       <li>A large magenta (wired) section is usually a GPU workload. Local LLMs live here.</li>
       <li>Growing cyan (compressed) means macOS is making room. It's the early warning before swapping.</li>
-      <li><code>SWAP ↑ ↓</code> in yellow or red is the slowdown itself. A big swap total with a plain SWAP figure is old news.</li>
+      <li><code>SWAP ⇅</code> in yellow or red is the slowdown itself. A big swap total with a plain SWAP figure is old news.</li>
     </ol>
   </section>
 </div>
