@@ -587,7 +587,11 @@ fn parse_nettop(out: &str) -> Vec<Flow> {
   flows
 }
 
-/// Connections of every process, `None` when `nettop` can't run.
+/// Connections of every process, `None` when `nettop` can't run. `nettop` reads the private
+/// NetworkStatistics framework with the `com.apple.private.network.statistics` entitlement; macmon
+/// can't hold that entitlement, and without it the framework reports only the current user's
+/// processes (checked on macOS 26.6), so the setuid-free way to see every process is `nettop`'s
+/// output, as `ps` is for CPU time.
 fn run_nettop() -> Option<Vec<Flow>> {
   let out = Command::new("/usr/bin/nettop")
     .args(NETTOP_ARGS)
