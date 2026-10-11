@@ -297,7 +297,7 @@ impl App {
 
   /// Key hints for the bottom border of the lowest box, keys bold, labels plain: the global keys
   /// in the order of the original UI with the state of the toggles (`q quit | ? help | p procs |
-  /// v graph | r scaled | -/+ 1000ms | ⇧-+ 3000ms`; no `p procs` while the window is too small
+  /// v graph | r scaled | -/+ 1000ms | [/] 3000ms`; no `p procs` while the window is too small
   /// for the process list), or the filter keys while a filter is typed
   /// (`Enter keep | Esc clear | ↑↓ select`).
   pub(super) fn footer_hints(&self) -> Vec<Vec<Span<'static>>> {
@@ -313,7 +313,7 @@ impl App {
       hint("v", self.cfg.view_type.label()),
       hint("r", self.cfg.ratio_mode.label()),
       hint("-/+", format!("{}ms", self.cfg.interval())),
-      hint("⇧-+", format!("{}ms", self.cfg.proc_interval())),
+      hint("[/]", format!("{}ms", self.cfg.proc_interval())),
     ]);
     hints
   }

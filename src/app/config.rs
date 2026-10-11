@@ -95,7 +95,7 @@ pub struct Config {
   run_interval: Option<u32>,
 
   /// Process list interval from `-I` for this run only: used instead of the saved one, never
-  /// saved. Shift-`-` / Shift-`+` replace both.
+  /// saved. `[` / `]` replace both.
   #[serde(skip)]
   run_proc_interval: Option<u32>,
 
@@ -429,7 +429,7 @@ mod tests {
     let mut cfg = Config::load_from(Some(file.path()));
     assert_eq!((cfg.interval(), cfg.proc_interval()), (1000, 3000));
 
-    // Shift-`-` / Shift-`+` step the process list interval by 500 ms and never touch `interval`
+    // `[` / `]` step the process list interval by 500 ms and never touch `interval`
     cfg.dec_proc_interval();
     assert_eq!((file.saved()["proc_interval"].clone(), cfg.proc_interval()), (2500.into(), 2500));
     assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (1000.into(), 1000));
@@ -454,7 +454,7 @@ mod tests {
     assert_eq!((file.saved()["proc_interval"].clone(), cfg.proc_interval()), (250.into(), 500));
     assert_eq!(Config::load_from(Some(file.path())).proc_interval(), 250);
 
-    // Shift-`-` / Shift-`+` step from the interval in use and save it
+    // `[` / `]` step from the interval in use and save it
     cfg.dec_proc_interval();
     assert_eq!((file.saved()["proc_interval"].clone(), cfg.proc_interval()), (250.into(), 250));
   }

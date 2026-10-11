@@ -414,13 +414,10 @@ impl App {
       KeyCode::Char('q') => return ControlFlow::Break(()),
       KeyCode::Char('?') => self.help = Some(0),
       KeyCode::Char('r') => self.cfg.toggle_ratio_mode(),
-      // Shift-`+` / Shift-`-` step the process list interval (`=` is `+` without shift)
-      KeyCode::Char('+') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-        self.cfg.inc_proc_interval();
-      }
-      KeyCode::Char('-') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-        self.cfg.dec_proc_interval();
-      }
+      // `[` / `]` step the process list interval: plain keys, since terminals take Ctrl- and
+      // Cmd-`+`/`-` for zoom
+      KeyCode::Char(']') => self.cfg.inc_proc_interval(),
+      KeyCode::Char('[') => self.cfg.dec_proc_interval(),
       KeyCode::Char('+') => self.cfg.inc_interval(),
       KeyCode::Char('=') => self.cfg.inc_interval(), // fallback to press without shift
       KeyCode::Char('-') => self.cfg.dec_interval(),
@@ -544,10 +541,6 @@ mod tests {
 
   fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
-  }
-
-  fn shift_key(c: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)
   }
 
   fn press(app: &mut App, code: KeyCode) -> ControlFlow<()> {
@@ -796,9 +789,9 @@ mod tests {
       assert_eq!(saved, (interval, interval.into()), "{c}");
     }
 
-    // Shift-+/Shift-- step the process list interval by 500 ms; `interval` is left alone
-    for (c, proc_interval) in [('+', 3500), ('-', 3000), ('-', 2500)] {
-      assert!(app.handle_key(shift_key(c)).is_continue());
+    // `]` / `[` step the process list interval by 500 ms; `interval` is left alone
+    for (c, proc_interval) in [(']', 3500), ('[', 3000), ('[', 2500)] {
+      assert!(app.handle_key(key(c)).is_continue());
       let saved = (app.cfg.proc_interval(), file.saved()["proc_interval"].clone());
       assert_eq!(saved, (proc_interval, proc_interval.into()), "{c}");
       assert_eq!(app.cfg.interval(), 1250, "{c}");
@@ -816,7 +809,7 @@ mod tests {
       assert_eq!(cells, line, "row {y}");
     }
     // the key hints show the settings
-    let hints = " v gauge | r active | -/+ 1250ms | ⇧-+ 2500ms ─╯";
+    let hints = " v gauge | r active | -/+ 1250ms | [/] 2500ms ─╯";
     assert!(row(&buf, 49).ends_with(hints), "{}", row(&buf, 49));
 
     assert!(app.handle_key(key('v')).is_continue());
